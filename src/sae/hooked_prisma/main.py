@@ -123,7 +123,6 @@ def train_sae_on_vision_model(
     while n_training_images < total_training_tokens:
         # Do a training step.
         layer_acts = activation_store.next_batch()
-        print('batch', layer_acts.shape, batch_size)
         n_training_images += batch_size
 
         # init these here to avoid uninitialized vars

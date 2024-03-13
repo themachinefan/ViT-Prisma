@@ -29,9 +29,10 @@ class VisionActivationsStore:
         self.model = model
 
         self.dataset = dataset
-        self.image_dataloader = iter(torch.utils.data.DataLoader(self.dataset, shuffle=True, num_workers=num_workers, batch_size=self.cfg.store_batch_size, collate_fn=collate_fn, drop_last=True))
-        self.image_dataloader_eval = iter(torch.utils.data.DataLoader(eval_dataset, shuffle=True, num_workers=num_workers, batch_size=self.cfg.store_batch_size, collate_fn=eval_collate_fn, drop_last=True))
-
+        self.image_dataloader = torch.utils.data.DataLoader(self.dataset, shuffle=True, num_workers=num_workers, batch_size=self.cfg.store_batch_size, collate_fn=collate_fn, drop_last=True)
+        self.image_dataloader_eval = torch.utils.data.DataLoader(eval_dataset, shuffle=True, num_workers=num_workers, batch_size=self.cfg.store_batch_size, collate_fn=eval_collate_fn, drop_last=True)
+        self.image_dataloader_iter = iter(self.image_dataloader)
+        self.image_dataloader_eval_iter = iter(self.image_dataloader_eval)
 
         #TODO does this actually still work?
         if self.cfg.use_cached_activations:  # EDIT: load from multi-layer acts
@@ -72,7 +73,12 @@ class VisionActivationsStore:
         device = self.cfg.device
         # fetch a batch of images... (shouldn't this be it's own dataloader...)
 
-        data = next(self.image_dataloader) 
+        try:
+            data = next(self.image_dataloader_iter) 
+        except StopIteration:
+            self.image_dataloader_iter = iter(self.image_dataloader)
+            data = next(self.image_dataloader_iter) 
+
         data.requires_grad_(False)
         return data.to(device)
     
@@ -86,8 +92,11 @@ class VisionActivationsStore:
         #TODO multi worker here 
         device = self.cfg.device
         # fetch a batch of images... (shouldn't this be it's own dataloader...)
-
-        image_data, labels = next(self.image_dataloader_eval) 
+        try:
+            image_data, labels = next(self.image_dataloader_eval) 
+        except StopIteration:
+            self.image_dataloader_eval_iter = iter(self.image_dataloader_eval)
+            image_data, labels = next(self.image_dataloader_eval) 
 
         image_data.requires_grad_(False)
         labels.requires_grad_(False)
