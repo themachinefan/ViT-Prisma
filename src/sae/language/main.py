@@ -80,7 +80,6 @@ if cfg.log_to_wandb:
     wandb.init(project=cfg.wandb_project, config=cast(Any, cfg), name=cfg.run_name)
 
 
-print("HI", len(sparse_autoencoder.autoencoders))
 # train SAE
 sparse_autoencoder = train_sae_on_language_model(
     model,

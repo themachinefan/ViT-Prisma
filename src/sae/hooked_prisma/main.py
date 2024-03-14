@@ -363,12 +363,22 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
             self.transform = transform
             self.labels = {}
 
-            # Load label name to index
-            with open(imagenet_class_index, 'r') as file:
-                num_to_word_dict = json.load(file)
-            self.label_to_index = { v[0]:int(k) for k,v in num_to_word_dict.items()}
 
-            # load label names 
+            # load label code to index
+            self.label_to_index = {}
+    
+            with open(imagenet_class_index, 'r') as file:
+                # Iterate over each line in the file
+                for line_num, line in enumerate(file):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(' ')
+                    code = parts[0]
+                    self.label_to_index[code] = line_num
+
+
+            # load image name to label code
             self.image_name_to_label = {}
 
             # Open the CSV file for reading
@@ -407,7 +417,14 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
             return image, label_i
 
 
-def setup(pretrained_path=None, expansion_factor = 64, layer=9):
+def setup(checkpoint_path,imagenet_path, pretrained_path=None, expansion_factor = 64, layer=9):
+
+    # assuming the same structure as here: https://www.kaggle.com/c/imagenet-object-localization-challenge/overview/description
+    imagenet_train_path = os.path.join(imagenet_path, "ILSVRC/Data/CLS-LOC/train")
+    imagenet_val_path  =os.path.join(imagenet_path, "ILSVRC/Data/CLS-LOC/val")
+    imagenet_val_labels = os.path.join(imagenet_path, "LOC_val_solution.csv")
+    imagenet_label_strings = os.path.join(imagenet_path, "LOC_synset_mapping.txt" )
+
     cfg = VisionModelRunner(
         #TODO expose more 
     # Data Generating Function (Model + Training Distibuion)
@@ -455,7 +472,7 @@ def setup(pretrained_path=None, expansion_factor = 64, layer=9):
     device = "cuda",
     seed = 42,
     n_checkpoints = 10,
-    checkpoint_path = r"F:\ViT-Prisma_fork\data\vision_sae_checkpoints", # #TODO 
+    checkpoint_path = checkpoint_path, # #TODO 
     dtype = torch.float32,
 
     #loading
@@ -476,14 +493,11 @@ def setup(pretrained_path=None, expansion_factor = 64, layer=9):
         torchvision.transforms.Resize((224, 224)),
         torchvision.transforms.ToTensor(),
     ])
-    #TODO path in cfg(?)
-    # imagenet1k 
+
     
 
 
-
-
-    imagenet1k_data = torchvision.datasets.ImageFolder(r'F:\prisma_data\imagenet-object-localization-challenge\ILSVRC\Data\CLS-LOC\train', transform=data_transforms)
+    imagenet1k_data = torchvision.datasets.ImageFolder(imagenet_train_path, transform=data_transforms)
 
     def collate_fn(data):
 
@@ -496,9 +510,7 @@ def setup(pretrained_path=None, expansion_factor = 64, layer=9):
 
 
     
-
-    #TODO paths
-    imagenet1k_data_val = ImageNetValidationDataset(r'F:\prisma_data\imagenet-object-localization-challenge\ILSVRC\Data\CLS-LOC\val',r'F:\ViT-Prisma_fork\ViT-Prisma\data\imagenet_class_index.json', r"F:\prisma_data\imagenet-object-localization-challenge\LOC_val_solution.csv",data_transforms)
+    imagenet1k_data_val = ImageNetValidationDataset(imagenet_val_path,imagenet_label_strings, imagenet_val_labels ,data_transforms)
 
 
     def collate_fn_eval(data):
@@ -540,9 +552,15 @@ if __name__ == "__main__":
 
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint_path", 
+                        required=True,
+                        help="folder where you will save checkpoints"
+                        )
+    parser.add_argument('--imagenet_path', required=True, help='folder containing imagenet1k data organized as follows: https://www.kaggle.com/c/imagenet-object-localization-challenge/overview/description')
     parser.add_argument("--eval",
                         action="store_true",
                         help="run evals")
+    
     parser.add_argument("--expansion_factor",
                         type=int,
                         default=64)
@@ -550,12 +568,13 @@ if __name__ == "__main__":
     parser.add_argument("--layer",
                     type=int,
                     default=9)
-    parser.add_argument('--load', type=str, default=None, help='Pretrained SAE path')
 
+
+    parser.add_argument('--load', type=str, default=None, help='Pretrained SAE path')
     args = parser.parse_args()
 
     #TODO make note of when/if this changes... best to just make a new version tbh
-    cfg ,model, activations_loader, sae_group = setup(pretrained_path=args.load, expansion_factor=args.expansion_factor, layer=args.layer)
+    cfg ,model, activations_loader, sae_group = setup(args.checkpoint_path,args.imagenet_path, pretrained_path=args.load, expansion_factor=args.expansion_factor, layer=args.layer)
 
     if cfg.log_to_wandb:
         wandb.init(project=cfg.wandb_project, config=cast(Any, cfg), name=cfg.run_name)
