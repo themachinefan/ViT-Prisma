@@ -93,10 +93,10 @@ class VisionActivationsStore:
         device = self.cfg.device
         # fetch a batch of images... (shouldn't this be it's own dataloader...)
         try:
-            image_data, labels = next(self.image_dataloader_eval) 
+            image_data, labels = next(self.image_dataloader_eval_iter) 
         except StopIteration:
             self.image_dataloader_eval_iter = iter(self.image_dataloader_eval)
-            image_data, labels = next(self.image_dataloader_eval) 
+            image_data, labels = next(self.image_dataloader_eval_iter) 
 
         image_data.requires_grad_(False)
         labels.requires_grad_(False)
