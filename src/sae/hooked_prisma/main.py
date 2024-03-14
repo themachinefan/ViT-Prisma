@@ -26,7 +26,7 @@ from torch.optim import Adam
 from tqdm import tqdm
 
 from sae.hooked_prisma.vision_evals import run_evals_vision
-from sae.language.geom_median.src.geom_median.torch import compute_geometric_median
+from sae.hooked_prisma.geometric_median import compute_geometric_median
 from sae.language.optim import get_scheduler
 from sae.language.sae_group import SAEGroup
 from collections import defaultdict
@@ -101,8 +101,9 @@ def train_sae_on_vision_model(
     for sae in sae_group:
         hyperparams = sae.cfg
         sae_layer_id = all_layers.index(hyperparams.hook_point_layer)
-        layer_acts = activation_store.storage_buffer.detach().cpu()[:, sae_layer_id, :]
         if hyperparams.b_dec_init_method == "geometric_median":
+            layer_acts = activation_store.storage_buffer.detach()[:, sae_layer_id, :]
+
             # get geometric median of the activations if we're using those.
             print("HI computing geo mean")
             import time 
@@ -110,12 +111,14 @@ def train_sae_on_vision_model(
             if sae_layer_id not in geometric_medians:
 
                 median = compute_geometric_median(
-                    layer_acts, skip_typechecks=True, maxiter=100, per_component=False
+                    layer_acts, maxiter=200,
                 ).median
                 geometric_medians[sae_layer_id] = median
             sae.initialize_b_dec_with_precalculated(geometric_medians[sae_layer_id])
             print("DONE", time.perf_counter() - tic)
         elif hyperparams.b_dec_init_method == "mean":
+            layer_acts = activation_store.storage_buffer.detach().cpu()[:, sae_layer_id, :]
+
             sae.initialize_b_dec_with_mean(layer_acts)
         sae.train()
 
