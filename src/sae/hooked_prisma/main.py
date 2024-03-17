@@ -42,7 +42,7 @@ def train_sae_on_vision_model(
     wandb_log_frequency: int = 50,
 ):
     #TODO hacky fix this
-    total_training_tokens = cfg.total_training_images*197
+    total_training_tokens = cfg.total_training_images*cfg.context_size
     # batch size is number of tokens in a batcH??
     total_training_steps = total_training_tokens//batch_size
     n_training_steps = 0
@@ -105,9 +105,6 @@ def train_sae_on_vision_model(
             layer_acts = activation_store.storage_buffer.detach()[:, sae_layer_id, :]
 
             # get geometric median of the activations if we're using those.
-            print("HI computing geo mean")
-            import time 
-            tic = time.perf_counter()
             if sae_layer_id not in geometric_medians:
 
                 median = compute_geometric_median(
@@ -115,7 +112,6 @@ def train_sae_on_vision_model(
                 ).median
                 geometric_medians[sae_layer_id] = median
             sae.initialize_b_dec_with_precalculated(geometric_medians[sae_layer_id])
-            print("DONE", time.perf_counter() - tic)
         elif hyperparams.b_dec_init_method == "mean":
             layer_acts = activation_store.storage_buffer.detach().cpu()[:, sae_layer_id, :]
 
@@ -124,6 +120,7 @@ def train_sae_on_vision_model(
 
     pbar = tqdm(total=total_training_tokens, desc="Training SAE")
     while n_training_images < total_training_tokens:
+      
         # Do a training step.
         layer_acts = activation_store.next_batch()
         n_training_images += batch_size
@@ -420,7 +417,9 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
             return image, label_i
 
 
-def setup(checkpoint_path,imagenet_path, pretrained_path=None, expansion_factor = 64, layer=9):
+
+    
+def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, expansion_factor = 64, layers=9, context_size=50, model_name='vit_base_patch32_224'):
 
     # assuming the same structure as here: https://www.kaggle.com/c/imagenet-object-localization-challenge/overview/description
     imagenet_train_path = os.path.join(imagenet_path, "ILSVRC/Data/CLS-LOC/train")
@@ -432,9 +431,9 @@ def setup(checkpoint_path,imagenet_path, pretrained_path=None, expansion_factor 
         #TODO expose more 
     # Data Generating Function (Model + Training Distibuion)
    # model_name = "gpt2-small",
-    model_name = 'vit_base_patch16_224', #
-    hook_point = f"blocks.{layer}.hook_resid_pre", #
-    hook_point_layer = layer, # 
+    model_name = model_name, #
+    hook_point = "blocks.{layer}.hook_resid_pre",
+    hook_point_layer = layers, # 
     d_in = 768,
     #dataset_path = "Skylion007/openwebtext", #
     #is_dataset_tokenized=False,
@@ -448,7 +447,7 @@ def setup(checkpoint_path,imagenet_path, pretrained_path=None, expansion_factor 
     l1_coefficient = 0.00008,
     lr_scheduler_name="constantwithwarmup",
     train_batch_size = 4096,
-    context_size = 197, # TODO should be auto 
+    context_size = context_size, # TODO should be auto 
     lr_warm_up_steps=5000,
     
     # Activation Store Parameters
@@ -457,7 +456,7 @@ def setup(checkpoint_path,imagenet_path, pretrained_path=None, expansion_factor 
     total_training_images = 1_300_000*5,
 
 
-    store_batch_size = 16, # num images
+    store_batch_size = 32, # num images
     
     # Dead Neurons and Sparsity
     use_ghost_grads=True,
@@ -484,7 +483,10 @@ def setup(checkpoint_path,imagenet_path, pretrained_path=None, expansion_factor 
 
 
 
-
+    if cfg.from_pretrained_path is not None:
+        sae_group = SAEGroup.load_from_pretrained(cfg.from_pretrained_path)
+    else:
+        sae_group = SAEGroup(cfg)
 
 
     model = HookedViT.from_pretrained(cfg.model_name)
@@ -502,49 +504,25 @@ def setup(checkpoint_path,imagenet_path, pretrained_path=None, expansion_factor 
 
     imagenet1k_data = torchvision.datasets.ImageFolder(imagenet_train_path, transform=data_transforms)
 
-    def collate_fn(data):
 
-
-
-        imgs = [d[0] for d in data]
-
-        return torch.stack(imgs, dim=0)
-    
 
 
     
     imagenet1k_data_val = ImageNetValidationDataset(imagenet_val_path,imagenet_label_strings, imagenet_val_labels ,data_transforms)
 
 
-    def collate_fn_eval(data):
 
-
-
-        imgs = [d[0] for d in data]
-
-        return torch.stack(imgs, dim=0), torch.tensor([d[1] for d in data])
-
-    num_workers = 0 #TODO unclear if works without
 
     activations_loader = VisionActivationsStore(
         cfg,
         model,
         imagenet1k_data,
-        collate_fn = collate_fn,
 
         num_workers=num_workers,
         eval_dataset=imagenet1k_data_val,
-        eval_collate_fn=collate_fn_eval,
     )
 
-    # seems maybe ok
 
-
-    
-    if cfg.from_pretrained_path is not None:
-        sae_group = SAEGroup.load_from_pretrained(cfg.from_pretrained_path)
-    else:
-        sae_group = SAEGroup(cfg)
   
 
 
@@ -567,27 +545,31 @@ if __name__ == "__main__":
     parser.add_argument("--expansion_factor",
                         type=int,
                         default=64)
-    #TODO figure out how multiple layers work!
-    parser.add_argument("--layer",
+    parser.add_argument("--context_size",
+                        type=int,
+                        default=50)
+    
+    parser.add_argument("--num_workers",
+                        type=int,
+                        default=4)
+    parser.add_argument("--model_name",
+                        default="vit_base_patch32_224")
+    parser.add_argument("--layers",
                     type=int,
-                    default=9)
+                    nargs="+",
+                    default=[9])
 
 
     parser.add_argument('--load', type=str, default=None, help='Pretrained SAE path')
     args = parser.parse_args()
 
     #TODO make note of when/if this changes... best to just make a new version tbh
-    cfg ,model, activations_loader, sae_group = setup(args.checkpoint_path,args.imagenet_path, pretrained_path=args.load, expansion_factor=args.expansion_factor, layer=args.layer)
+    cfg ,model, activations_loader, sae_group = setup(args.checkpoint_path,args.imagenet_path, pretrained_path=args.load, expansion_factor=args.expansion_factor, layers=args.layers, context_size=args.context_size, model_name=args.model_name ,num_workers=args.num_workers)
 
     if cfg.log_to_wandb:
         wandb.init(project=cfg.wandb_project, config=cast(Any, cfg), name=cfg.run_name)
 
-
-
-
-    if args.eval:
-     
-        
+    if args.eval:   
         for (
             i,
             (sae),

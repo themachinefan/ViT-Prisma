@@ -66,8 +66,14 @@ class SparseAutoencoder(HookedRootModule):
         self.hook_hidden_post = HookPoint()
         self.hook_sae_out = HookPoint()
 
+
+        self.zero_loss = None
+
         self.setup()  # Required for `HookedRootModule`s
 
+
+    from line_profiler import profile
+    @profile
     def forward(self, x: torch.Tensor, dead_neuron_mask: torch.Tensor | None = None):
         # move x to correct dtype
         x = x.to(self.dtype)
@@ -96,18 +102,20 @@ class SparseAutoencoder(HookedRootModule):
 
         # add config for whether l2 is normalized:
         x_centred = x - x.mean(dim=0, keepdim=True)
-        mse_loss = (
-            torch.pow((sae_out - x.float()), 2)
-            / (x_centred**2).sum(dim=-1, keepdim=True).sqrt()
-        )
 
-        mse_loss_ghost_resid = torch.tensor(0.0, dtype=self.dtype, device=self.device)
+
+        mse_loss = torch.nn.functional.mse_loss(sae_out, x.detach(), reduction='none')
+        norm_factor = torch.norm(x_centred, p=2, dim=-1, keepdim=True)
+        mse_loss = mse_loss / norm_factor
+ 
+        if self.zero_loss is None:
+            self.zero_loss = torch.tensor(0.0, dtype=self.dtype, device=self.device)
         # gate on config and training so evals is not slowed down.
         if (
             self.cfg.use_ghost_grads
             and self.training
             and dead_neuron_mask is not None
-            and dead_neuron_mask.sum() > 0
+            and  torch.any(dead_neuron_mask)
         ):
             # ghost protocol
 
@@ -132,6 +140,10 @@ class SparseAutoencoder(HookedRootModule):
             mse_loss_ghost_resid = mse_rescaling_factor * mse_loss_ghost_resid
 
             mse_loss_ghost_resid = mse_loss_ghost_resid.mean()
+        else:
+  
+            mse_loss_ghost_resid = self.zero_loss
+
 
         mse_loss = mse_loss.mean()
         sparsity = feature_acts.norm(p=self.lp_norm, dim=1).mean(dim=(0,))
