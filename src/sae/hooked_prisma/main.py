@@ -355,13 +355,27 @@ def wandb_log_suffix(cfg: Any, hyperparams: Any):
     )
     return suffix
 
+def get_imagenet_index_to_name(imagenet_path):
+    ind_to_name = {}
+
+    with open( os.path.join(imagenet_path, "LOC_synset_mapping.txt" ), 'r') as file:
+        # Iterate over each line in the file
+        for line_num, line in enumerate(file):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(' ')
+            label = parts[1].split(',')[0]
+            ind_to_name[line_num] = label
+    return ind_to_name
 
 
 class ImageNetValidationDataset(torch.utils.data.Dataset):
-        def __init__(self, images_dir, imagenet_class_index, validation_labels,  transform=None):
+        def __init__(self, images_dir, imagenet_class_index, validation_labels,  transform=None, return_index=False):
             self.images_dir = images_dir
             self.transform = transform
             self.labels = {}
+            self.return_index = return_index
 
 
             # load label code to index
@@ -414,7 +428,10 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
             if self.transform:
                 image = self.transform(image)
 
-            return image, label_i
+            if self.return_index:
+                return image, label_i, idx
+            else:
+                return image, label_i
 
 
 
