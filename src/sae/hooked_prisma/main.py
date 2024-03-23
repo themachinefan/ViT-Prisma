@@ -451,7 +451,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     model_name = model_name, #
     hook_point = "blocks.{layer}.mlp.hook_post", #"blocks.{layer}.hook_resid_pre",
     hook_point_layer = layers, # 
-    d_in = 768,
+    d_in = 2048,# 768,
     #dataset_path = "Skylion007/openwebtext", #
     #is_dataset_tokenized=False,
     
@@ -506,7 +506,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
         sae_group = SAEGroup(cfg)
 
 
-    model = HookedViT.from_pretrained(cfg.model_name)
+    model = HookedViT.from_pretrained(cfg.model_name, is_timm=False, is_clip=True)
     model.to(cfg.device)
 
 
@@ -570,7 +570,7 @@ if __name__ == "__main__":
                         type=int,
                         default=4)
     parser.add_argument("--model_name",
-                        default="vit_base_patch32_224")
+                        default="wkcn/TinyCLIP-ViT-40M-32-Text-19M-LAION400M")
     parser.add_argument("--layers",
                     type=int,
                     nargs="+",
