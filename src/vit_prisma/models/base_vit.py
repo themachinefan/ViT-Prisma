@@ -152,11 +152,13 @@ class HookedViT(HookedRootModule):
 
         batch_size = input.shape[0]
 
-        embed = self.hook_embed(self.embed(input))
-
+        embed = self.embed(input)
         if self.cfg.classification_type == 'cls':
             cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # CLS token for each item in the batch
             embed = torch.cat((cls_tokens, embed), dim=1) # Add to embedding
+
+        embed = self.hook_embed(embed)
+
         pos_embed = self.hook_pos_embed(self.pos_embed(input))
         
         residual = embed + pos_embed
@@ -793,3 +795,39 @@ class HookedViT(HookedRootModule):
             assert (
                 self.cfg.use_attn_in
             ), f"Cannot add hook {hook_point_name} if use_attn_in is False"
+
+
+    def accumulated_bias(
+        self, layer: int, mlp_input: bool = False, include_mlp_biases=True
+    ) -> Float[torch.Tensor, "layers_accumulated_over d_model"]:
+        """Accumulated Bias.
+
+        Returns the accumulated bias from all layer outputs (ie the b_Os and b_outs), up to the
+        input of layer L.
+
+        Args:
+            layer (int): Layer number, in [0, n_layers]. layer==0 means no layers, layer==n_layers
+                means all layers.
+            mlp_input (bool): If True, we take the bias up to the input of the MLP
+                of layer L (ie we include the bias from the attention output of the current layer,
+                otherwise just biases from previous layers)
+            include_mlp_biases (bool): Whether to include the biases of MLP layers. Often useful to
+                have as False if we're expanding attn_out into individual heads, but keeping mlp_out
+                as is.
+
+        Returns:
+            bias (torch.Tensor): [d_model], accumulated bias
+        """
+
+        accumulated_bias = torch.zeros(self.cfg.d_model, device=self.cls_token.device)
+
+        for i in range(layer):
+            accumulated_bias += self.blocks[i].attn.b_O
+            if include_mlp_biases:
+                accumulated_bias += self.blocks[i].mlp.b_out
+        if mlp_input:
+            assert (
+                layer < self.cfg.n_layers
+            ), "Cannot include attn_bias from beyond the final layer"
+            accumulated_bias += self.blocks[layer].attn.b_O
+        return accumulated_bias

@@ -30,6 +30,8 @@ from sae.hooked_prisma.vision_config import VisionModelRunner
 import cv2
 torch.set_grad_enabled(False)
 from dataclasses import dataclass
+from sae.language.sae_group import SAEGroup
+from vit_prisma.models.base_vit import HookedViT
 
 @dataclass
 class FeatureInfo:
@@ -104,37 +106,66 @@ def find_highest_activating_batch(
 ): 
     '''
     Returns the indices & values for the highest-activating tokens in the given batch of data.
-    num_autoencoders,k, num_features 4,  (where 4 = batchid, patchid, val, predclass)  
+    num_autoencoders,k, num_features 148,  (where 148 = batchid, patchid, true val, 145 decomposed vals)  
     '''
     # Get the post activations from the clean run
     _, cache = model.run_with_cache(images)
     # sae_out, feature_acts, loss, mse_loss, l1_loss, mse_loss_ghost_resid = sparse_autoencoder(
     #     cache[sparse_autoencoder.cfg.hook_point]
     # )
+
+
+
+    decomposition,labels = cache.get_full_resid_decomposition(return_labels=True, expand_neurons=False) #Parts Batch Patch Dim
     
+    #indices = [i for i, item in enumerate(labels) if item in items_to_find]
     largest_activations = []
     smallest_activations = []
-    for cur_feature_ids, autoencoder in zip(feature_ids, autoencoders):
-        post_reshaped = einops.rearrange( cache[autoencoder.cfg.hook_point], "batch seq d_mlp -> (batch seq) d_mlp")
+
+    for layer_i, (cur_feature_ids, autoencoder) in enumerate(zip(feature_ids, autoencoders)):
+        relevant_inputs = ['embed', 'pos_embed'] 
+        for li in range(layer_i):
+            relevant_inputs =  relevant_inputs + [f"{li}_mlp_out"] + [f"L{li}H{hi}" for hi in range(model.cfg.n_heads)]
+        indices = [i for i, item in enumerate(labels) if item in relevant_inputs]
+        inp = decomposition[indices]
+        post_reshaped = einops.rearrange( inp, "decom batch seq d_mlp -> decom (batch seq) d_mlp")
         seq_len = cache[autoencoder.cfg.hook_point].shape[1]
-        sae_in =  post_reshaped - autoencoder.b_dec 
-        acts = einops.einsum(
+        sae_in =  post_reshaped #- autoencoder.b_dec  NOTE we want to decompose so we do this below (won't change which has largest impact per feature)
+        acts_decomp = einops.einsum(
                 sae_in,
+                autoencoder.W_enc[:, cur_feature_ids], #dim numfeatures
+                "decomp ... d_in, d_in n -> decomp ... n",
+            )
+        acts = acts_decomp.sum(0) 
+        
+        bias = einops.einsum(
+                autoencoder.b_dec,
                 autoencoder.W_enc[:, cur_feature_ids],
                 "... d_in, d_in n -> ... n",
             )
+        acts = acts - bias
         
-        top_acts_values, top_acts_indices = acts.topk(k, dim=0)
-        top_acts_batch = top_acts_indices // seq_len
-        top_acts_seq = top_acts_indices % seq_len
-        largest = torch.stack([top_acts_batch, top_acts_seq, top_acts_values], dim=-1)
-        largest_activations.append(largest)
 
-        top_acts_values, top_acts_indices = acts.topk(k, dim=0, largest=False)
-        top_acts_batch = top_acts_indices // seq_len
-        top_acts_seq = top_acts_indices % seq_len
-        largest = torch.stack([top_acts_batch, top_acts_seq, top_acts_values], dim=-1)
-        smallest_activations.append(largest)
+        
+        extremes = []
+        for is_largest in [True,False]:
+            top_acts_values, top_acts_indices = acts.topk(k, dim=0, largest=is_largest)
+            expanded_indices = top_acts_indices.unsqueeze(0).expand(acts_decomp.shape[0], *top_acts_indices.shape)
+            top_acts_values_decomp = torch.gather(acts_decomp, 1, expanded_indices)
+
+           # assert torch.allclose(top_acts_values , top_acts_values_decomp.sum(0)) # check only works without bias above
+            top_acts_values_decomp = einops.rearrange(top_acts_values_decomp, "a b c -> b c a")
+
+            top_acts_values_decomp = torch.nn.functional.pad(top_acts_values_decomp, (0,145-top_acts_values_decomp.shape[-1]), "constant", 0)
+            top_acts_batch = top_acts_indices // seq_len
+            top_acts_seq = top_acts_indices % seq_len
+ 
+            largest = torch.concatenate([top_acts_batch.unsqueeze(-1), top_acts_seq.unsqueeze(-1), top_acts_values.unsqueeze(-1), top_acts_values_decomp], dim=-1)
+            extremes.append(largest)
+        largest_activations.append(extremes[0])
+        smallest_activations.append(extremes[1])
+
+
     big = torch.stack(largest_activations, dim=0)
     small = torch.stack(smallest_activations, dim=0)
     return big ,  small
@@ -151,7 +182,7 @@ def find_highest_activating(
 ): # num_autoencoders, num_features, k, 4
     biggest, smallest = None, None
 
-    n, m, p = len(autoencoders), feature_ids.shape[1], 3
+    n, m, p = len(autoencoders), feature_ids.shape[1], 148
     n_indices = torch.arange(n).view(-1, 1, 1, 1).expand(n, k, m, p).to(device)
     m_indices = torch.arange(m).view(1, 1, -1, 1).expand(n, k, m, p).to(device)
     p_indices = torch.arange(p).view(1, 1, 1, -1).expand(n, k, m, p).to(device)
@@ -190,6 +221,7 @@ def generate_images(
         imagenet_index_to_name,
         autoencoder_layer_names,
         output_folder,
+        map_output_folder,
         header="",
         border_color=(0,0,0),
         patch_size=32,
@@ -197,9 +229,14 @@ def generate_images(
     BID = 0
     PID = 1
     VAL = 2
+    DECOMP_START = 3
     for i in range(features_ids.shape[0]):
         autoencoder_id = autoencoder_layer_names[i] 
         for ii, feature_id in enumerate(features_ids[i]):
+
+            if os.path.exists(os.path.join(output_folder,f'layer_{autoencoder_id}_feature_{feature_id}.png')):
+                print("HACK")
+                continue
             print(f"looking at {feature_id}")
             images = []
             gt_labels = []
@@ -220,7 +257,13 @@ def generate_images(
             fig.suptitle(f'{header}\nLayer {autoencoder_id}, Feature {feature_id}, hit count: {features_hit_count[i,ii]}')
             for ax in axs.flatten():
                 ax.axis('off')
+
+
+            source = torch.zeros((145,)).to(highest_activations.device)
             for grid_i, (image_tensor, label, iii) in enumerate(zip(images, gt_labels, list(range(highest_activations.shape[2])))):
+
+                source = source + highest_activations[i, ii, iii, DECOMP_START:]
+
                 pid, act_val = int(highest_activations[i, ii, iii, PID].item()), highest_activations[i, ii, iii, VAL].item()
 
                 row = grid_i // grid_size
@@ -245,7 +288,8 @@ def generate_images(
                 axs[row, col].set_title(f"gt: {label} {act_val:0.03f} {'class token!' if pid==0 else ''}")  
                 axs[row, col].axis('off')  
 
-            #TODO SAVE
+   
+
                             
             from io import BytesIO
 
@@ -257,13 +301,56 @@ def generate_images(
             img = cv2.imdecode(np.frombuffer(buf.read(), np.uint8), cv2.IMREAD_UNCHANGED)
 
             # Specify the border size and color
-            border_size = 5
+            border_size = 10
 
             # Add the border to the image
             bordered_img = cv2.copyMakeBorder(img, top=border_size, bottom=border_size, left=border_size, right=border_size, borderType=cv2.BORDER_CONSTANT, value=border_color)
-
+            bordered_img[0,0,:] = 0
             cv2.imwrite(os.path.join(output_folder,f'layer_{autoencoder_id}_feature_{feature_id}.png'), bordered_img)
 
+            plt.close()
+
+
+   
+            source = source.detach().cpu().numpy()
+
+            source_head = np.zeros((13,)) 
+            source_head[0:2] = source[0:2]
+
+            source = np.concatenate([ source_head[None], np.reshape(source[2:], (-1,13)) ], axis=0)
+
+            #gross clean up
+            if border_color[1] == 0:
+                source = -source
+
+            n,m = source.shape    
+            fig, ax = plt.subplots()
+            fig.suptitle(f'Important sources\nLayer {autoencoder_id}, Feature {feature_id}, hit count: {features_hit_count[i,ii]}')
+
+
+
+
+
+            cax = ax.imshow(source, cmap='viridis', interpolation='nearest')
+            plt.colorbar(cax)
+
+            ax.set_xticks(np.arange(0, m), minor=False)
+            ax.set_yticks(np.arange(0, n), minor=False)
+
+            
+            ax.set_xticklabels(["MLP"] + [f"H{hi}" for hi in range(12)])
+            ax.set_yticklabels(["embed/pos"] + [f"L{li}" for li in range(11)])
+
+            ax.set_xticks(np.arange(-0.5, m - 0.5, 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, n - 0.5, 1), minor=True)
+            ax.grid(which="minor", color="w", linestyle='-', linewidth=2)
+
+            ax.tick_params(which="major", bottom=True, left=True, labelbottom=True, labelleft=True)
+
+            # Save
+
+            plt.savefig(os.path.join(map_output_folder,f'layer_{autoencoder_id}_feature_{feature_id}.png'))            
+            plt.close()
           #  fig.savefig(os.path.join(output_folder,f'layer_{autoencoder_id}_feature_{feature_id}.png'), dpi=300)
 
 if __name__ == "__main__":
@@ -273,42 +360,28 @@ if __name__ == "__main__":
     device = "cuda" #not actually set up for cpu atm :P 
     checkpoint_path= "F:/ViT-Prisma_fork/data/vision_sae_checkpoints"
     imagenet_path = "F:/prisma_data/imagenet-object-localization-challenge"
-    pretrained_path="F:/ViT-Prisma_fork/data/vision_sae_checkpoints/organized/130002944_sae_group_vit_base_patch32_224_blocks.-11.hook_resid_pre_24576.pt"
+    pretrained_path="F:/ViT-Prisma_fork/data/vision_sae_checkpoints/organized"
     output_path = "F:/ViT-Prisma_fork/data/feature_images"
     output_cache = os.path.join(output_path, "cache")
     os.makedirs(output_path,exist_ok=True)
     os.makedirs(output_cache,exist_ok=True)
 
 
-
-
-    
-
-    #TODO these are saved in config probably, should load from there (in fact I think it already does). 
-    # pretrained_layers = [9]
-    # pretrained_expansion_factor = 32
-    # pretrained_model_name = "vit_base_patch16_224"
-    # pretrained_context_size = 197
-    pretrained_layers = [0,1,2,3,4,5,6,7,8,9,10,11]
-    pretrained_expansion_factor = 32
     pretrained_model_name = "vit_base_patch32_224"
-    pretrained_context_size = 50 
+    model = HookedViT.from_pretrained(pretrained_model_name)
+    model.to(device)
 
-    cfg ,model, activations_loader, sae_group = setup(checkpoint_path=checkpoint_path, 
-                                                    imagenet_path=imagenet_path ,
-                                                        pretrained_path=pretrained_path, layers= pretrained_layers, expansion_factor=pretrained_expansion_factor,
-                                                        model_name=pretrained_model_name, context_size=pretrained_context_size)
 
-    for i, sae in enumerate(sae_group):
-        hyp = sae.cfg
-        print(
-            f"{i}: Layer {hyp.hook_point_layer}, p_norm {hyp.lp_norm}, alpha {hyp.l1_coefficient}"
-        )
 
-    saes = sae_group.autoencoders
-    for s in saes:
-        print(cfg.hook_point)
+    saes = []
+    pretrained_layers = []
+    for i in range(12):
+        pretrained_layers.append(i)
+        sae_group = SAEGroup.load_from_pretrained(os.path.join(pretrained_path, f"layer_{i}.pt"))
 
+        saes.append(sae_group.autoencoders[0])
+
+ 
 
 
 
@@ -337,8 +410,6 @@ if __name__ == "__main__":
         hit_count = torch.load(hit_count_path)
         hit_count = hit_count.to(device)
     else:
-        for thing, _, _ in tqdm(dataloader):
-            print(thing)
         hit_count = count_activated(
             dataloader,
             model,
@@ -346,18 +417,12 @@ if __name__ == "__main__":
             device=device)
         torch.save(hit_count, hit_count_path)
     
-    print(hit_count.shape)
     top_amount = 20
     random_amount = 20
     top_vals, top_inds = hit_count.topk(top_amount, dim=1)
     
 
 
-    random_indices = torch.stack([torch.randperm(hit_count.shape[1]).to(device)[:random_amount] for _ in range(hit_count.shape[0])])
-    random_values = torch.gather(hit_count, 1, random_indices)
-
-    print(top_inds.shape, random_indices.shape)
-    all_indices = torch.cat([top_inds, random_indices], dim=1)
 
 
     num_images = 25
@@ -365,29 +430,47 @@ if __name__ == "__main__":
     highest_activating_path = os.path.join(output_cache, "highest_activating.pt" )
 
     if os.path.exists(highest_activating_path) and use_cache:
-        highest_activation, lowest_activation = torch.load(highest_activating_path)
+        highest_activation, lowest_activation, all_indices, random_indices, random_values = torch.load(highest_activating_path)
     else:
+
+        torch.manual_seed(0)
+
+
+
+        random_indices = []
+        random_values = []
+        for i in range(hit_count.shape[0]):
+            cur_hit_counts = hit_count[i]
+            notable_cur_hit_counts_inds = torch.where(cur_hit_counts>200)[0]
+            inds = notable_cur_hit_counts_inds[torch.randperm(notable_cur_hit_counts_inds.size(0))[:random_amount]]
+            random_values.append(cur_hit_counts[inds])
+            random_indices.append(inds)
+
+        random_values = torch.stack(random_values)
+        random_indices = torch.stack(random_indices)
+
+       
+        all_indices = torch.cat([top_inds, random_indices], dim=1)
+
+
         highest_activation, lowest_activation = find_highest_activating(dataloader, model, saes, all_indices,k=num_images, device=device )
-        torch.save([highest_activation,lowest_activation], highest_activating_path)
+        torch.save([highest_activation,lowest_activation, all_indices, random_indices, random_values], highest_activating_path)
 
     ha_top, ha_rand = highest_activation[:, :top_amount], highest_activation[:, top_amount:]
     la_top, la_rand = lowest_activation[:, :top_amount], lowest_activation[:, top_amount:]
-
 
     for name, feature_ids, feature_hit_count, highest_activation, border_color in zip(["top_feature_high_activations","top_feature_low_activations","random_feature_high_activations","random_feature_low_activations"],
                                                                         [top_inds, top_inds, random_indices, random_indices],
                                                                         [top_vals,top_vals,random_values,random_values],
                                                                         [ha_top, la_top, ha_rand, la_rand],
                                                                    #     [(0.0,1.0,0.0), (0.,0.0,1.), (0.,1.,0.), (0.,0.,1.)]
-                                                                        [(0,255,0), (0,0,255), (0,255,0), (0,0,255)]
+                                                                        [(0,200,0), (0,0,200), (0,200,0), (0,0,200)]
 
                                                                         ):
         fold = os.path.join(output_path, name)
         os.makedirs(fold, exist_ok=True)
-        print("HI", top_inds.shape, random_indices.shape, feature_ids.shape)
-        print(feature_ids.shape)
-        print(highest_activation.shape)
-        print("sig")
+        map_output_folder = os.path.join(output_path, name + "_sourcemap")
+        os.makedirs(map_output_folder,exist_ok=True)
         generate_images(
             feature_ids, 
             feature_hit_count,
@@ -396,11 +479,11 @@ if __name__ == "__main__":
             imagenet_index_to_name,
             pretrained_layers,
             fold,
+            map_output_folder, 
             border_color=border_color,
             header=name.replace("_"," "),
         )
 
     
-    print("TODO SPLIT:")
 
 

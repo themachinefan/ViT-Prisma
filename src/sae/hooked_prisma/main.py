@@ -449,7 +449,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     # Data Generating Function (Model + Training Distibuion)
    # model_name = "gpt2-small",
     model_name = model_name, #
-    hook_point = "blocks.{layer}.hook_resid_pre",
+    hook_point = "blocks.{layer}.mlp.hook_post", #"blocks.{layer}.hook_resid_pre",
     hook_point_layer = layers, # 
     d_in = 768,
     #dataset_path = "Skylion007/openwebtext", #
@@ -470,7 +470,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     # Activation Store Parameters
     n_batches_in_buffer = 128,
     #total_training_tokens = 1_000_000 * 300, #
-    total_training_images = 1_300_000*5,
+    total_training_images = 1_300_000*3,
 
 
     store_batch_size = 32, # num images
