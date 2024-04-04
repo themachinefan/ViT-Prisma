@@ -521,9 +521,14 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
 
 
     import torchvision
+    from transformers import CLIPProcessor
+    clip_processor = CLIPProcessor.from_pretrained(cfg.model_name)
     data_transforms = torchvision.transforms.Compose([
         torchvision.transforms.Resize((224, 224)),
         torchvision.transforms.ToTensor(),
+        #TODO for clip only 
+        torchvision.transforms.Normalize(mean=clip_processor.image_processor.image_mean,
+                         std=clip_processor.image_processor.image_std),
     ])
 
     
