@@ -242,13 +242,15 @@ def train_sae_on_vision_model(
                 ):
                     sparse_autoencoder.eval()
                     suffix = wandb_log_suffix(sae_group.cfg, hyperparams)
-                    run_evals_vision(
-                        sparse_autoencoder,
-                        activation_store,
-                        model,
-                        n_training_steps,
-                        suffix=suffix,
-                    )
+                    #TODO fix for clip!!
+                    print("eval only set up for classifier models..")
+                    # run_evals_vision(
+                    #     sparse_autoencoder,
+                    #     activation_store,
+                    #     model,
+                    #     n_training_steps,
+                    #     suffix=suffix,
+                    # )
                     sparse_autoencoder.train()
 
             loss.backward()
@@ -277,21 +279,29 @@ def train_sae_on_vision_model(
             if len(checkpoint_thresholds) == 0:
                 n_checkpoints = 0
             if sae_group.cfg.log_to_wandb:
-                model_artifact = wandb.Artifact(
-                    f"{sae_group.get_name()}",
-                    type="model",
-                    metadata=dict(sae_group.cfg.__dict__),
-                )
-                model_artifact.add_file(path)
-                wandb.log_artifact(model_artifact)
+                import re
 
-                sparsity_artifact = wandb.Artifact(
-                    f"{sae_group.get_name()}_log_feature_sparsity",
-                    type="log_feature_sparsity",
-                    metadata=dict(sae_group.cfg.__dict__),
-                )
-                sparsity_artifact.add_file(log_feature_sparsity_path)
-                wandb.log_artifact(sparsity_artifact)
+                name_for_log  = fixed_artifact_name = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
+                try:
+                    model_artifact = wandb.Artifact(
+                        f"{name_for_log}",
+                        type="model",
+                        metadata=dict(sae_group.cfg.__dict__),
+                    )
+                    model_artifact.add_file(path)
+                    wandb.log_artifact(model_artifact)
+
+                    sparsity_artifact = wandb.Artifact(
+                        f"{name_for_log}_log_feature_sparsity",
+                        type="log_feature_sparsity",
+                        metadata=dict(sae_group.cfg.__dict__),
+                    )
+                    sparsity_artifact.add_file(log_feature_sparsity_path)
+                    wandb.log_artifact(sparsity_artifact)
+                except:
+                    pass
+        
+
 
                 ###############
 
@@ -436,7 +446,7 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
 
 
     
-def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, expansion_factor = 64, layers=9, context_size=50, model_name='vit_base_patch32_224'):
+def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, expansion_factor = 64, layers=9, context_size=197, model_name='vit_base_patch32_224'):
 
     # assuming the same structure as here: https://www.kaggle.com/c/imagenet-object-localization-challenge/overview/description
     imagenet_train_path = os.path.join(imagenet_path, "ILSVRC/Data/CLS-LOC/train")
@@ -451,7 +461,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     model_name = model_name, #
     hook_point = "blocks.{layer}.mlp.hook_post", #"blocks.{layer}.hook_resid_pre",
     hook_point_layer = layers, # 
-    d_in = 2048,# 768,
+    d_in = 1024,# 768,
     #dataset_path = "Skylion007/openwebtext", #
     #is_dataset_tokenized=False,
     
@@ -463,12 +473,12 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     lr = 0.0004,
     l1_coefficient = 0.00008,
     lr_scheduler_name="constantwithwarmup",
-    train_batch_size = 4096,
+    train_batch_size = 1024,
     context_size = context_size, # TODO should be auto 
     lr_warm_up_steps=5000,
     
     # Activation Store Parameters
-    n_batches_in_buffer = 128,
+    n_batches_in_buffer = 32,
     #total_training_tokens = 1_000_000 * 300, #
     total_training_images = 1_300_000*3,
 
@@ -564,13 +574,13 @@ if __name__ == "__main__":
                         default=64)
     parser.add_argument("--context_size",
                         type=int,
-                        default=50)
+                        default=197)
     
     parser.add_argument("--num_workers",
                         type=int,
                         default=4)
     parser.add_argument("--model_name",
-                        default="wkcn/TinyCLIP-ViT-40M-32-Text-19M-LAION400M")
+                        default="wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M")
     parser.add_argument("--layers",
                     type=int,
                     nargs="+",
