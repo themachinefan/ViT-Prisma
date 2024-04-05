@@ -6,6 +6,7 @@ import argparse
 import wandb
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["WANDB__SERVICE_WAIT"] = "300"
+import re
 
 from sae.hooked_prisma.vision_config import VisionModelRunner
 
@@ -244,13 +245,16 @@ def train_sae_on_vision_model(
                     suffix = wandb_log_suffix(sae_group.cfg, hyperparams)
                     #TODO fix for clip!!
                     print("eval only set up for classifier models..")
-                    # run_evals_vision(
-                    #     sparse_autoencoder,
-                    #     activation_store,
-                    #     model,
-                    #     n_training_steps,
-                    #     suffix=suffix,
-                    # )
+                    try: 
+                        run_evals_vision(
+                            sparse_autoencoder,
+                            activation_store,
+                            model,
+                            n_training_steps,
+                            suffix=suffix,
+                        )
+                    except:
+                        pass
                     sparse_autoencoder.train()
 
             loss.backward()
@@ -279,9 +283,8 @@ def train_sae_on_vision_model(
             if len(checkpoint_thresholds) == 0:
                 n_checkpoints = 0
             if sae_group.cfg.log_to_wandb:
-                import re
 
-                name_for_log  = fixed_artifact_name = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
+                name_for_log = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
                 try:
                     model_artifact = wandb.Artifact(
                         f"{name_for_log}",
@@ -312,14 +315,17 @@ def train_sae_on_vision_model(
         pbar.update(batch_size)
 
     # save sae group to checkpoints folder
-    path = f"{sae_group.cfg.checkpoint_path}/final_{sae_group.get_name()}.pt"
+    name_for_log = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
+    path = f"{sae_group.cfg.checkpoint_path}/final_{name_for_log}.pt"
     for sae in sae_group:
         sae.set_decoder_norm_to_unit_norm()
     sae_group.save_model(path)
 
     if sae_group.cfg.log_to_wandb:
+
+        name_for_log = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
         model_artifact = wandb.Artifact(
-            f"{sae_group.get_name()}",
+            f"{name_for_log}",
             type="model",
             metadata=dict(sae_group.cfg.__dict__),
         )
@@ -337,8 +343,10 @@ def train_sae_on_vision_model(
     torch.save(log_feature_sparsity, log_feature_sparsity_path)
 
     if sae_group.cfg.log_to_wandb:
+        name_for_log = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
+
         sparsity_artifact = wandb.Artifact(
-            f"{sae_group.get_name()}_log_feature_sparsity",
+            f"{name_for_log}_log_feature_sparsity",
             type="log_feature_sparsity",
             metadata=dict(sae_group.cfg.__dict__),
         )
@@ -473,14 +481,14 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     lr = 0.0004,
     l1_coefficient = 0.00008,
     lr_scheduler_name="constantwithwarmup",
-    train_batch_size = 1024,
+    train_batch_size = 1024*4,
     context_size = context_size, # TODO should be auto 
     lr_warm_up_steps=5000,
     
     # Activation Store Parameters
     n_batches_in_buffer = 32,
     #total_training_tokens = 1_000_000 * 300, #
-    total_training_images = 1_300_000*3,
+    total_training_images = 1_300_000,#1_300_000*3,
 
 
     store_batch_size = 32, # num images

@@ -31,18 +31,18 @@ def run_evals_vision(
     eval_tokens = activation_store.get_batch_tokens()
 
     # Get Reconstruction Score
-    losses_df = recons_loss_batched(
-        sparse_autoencoder,
-        model,
-        activation_store,
-        n_batches=10,
-    )
+    # losses_df = recons_loss_batched(
+    #     sparse_autoencoder,
+    #     model,
+    #     activation_store,
+    #     n_batches=10,
+    # )
 
 
-    recons_score = losses_df["score"].mean()
-    ntp_loss = losses_df["loss"].mean()
-    recons_loss = losses_df["recons_loss"].mean()
-    zero_abl_loss = losses_df["zero_abl_loss"].mean()
+    # recons_score = losses_df["score"].mean()
+    # ntp_loss = losses_df["loss"].mean()
+    # recons_loss = losses_df["recons_loss"].mean()
+    # zero_abl_loss = losses_df["zero_abl_loss"].mean()
 
     # get cache
     _, cache = model.run_with_cache(
@@ -79,10 +79,10 @@ def run_evals_vision(
             f"metrics/l2_norm{suffix}": l2_norm_out.mean().item(),
             f"metrics/l2_ratio{suffix}": l2_norm_ratio.mean().item(),
             # CE Loss
-            f"metrics/CE_loss_score{suffix}": recons_score,
-            f"metrics/ce_loss_without_sae{suffix}": ntp_loss,
-            f"metrics/ce_loss_with_sae{suffix}": recons_loss,
-            f"metrics/ce_loss_with_ablation{suffix}": zero_abl_loss,
+            # f"metrics/CE_loss_score{suffix}": recons_score,
+            # f"metrics/ce_loss_without_sae{suffix}": ntp_loss,
+            # f"metrics/ce_loss_with_sae{suffix}": recons_loss,
+            # f"metrics/ce_loss_with_ablation{suffix}": zero_abl_loss,
         },
         step=n_training_steps,
     )
