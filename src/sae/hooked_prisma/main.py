@@ -333,7 +333,7 @@ def train_sae_on_vision_model(
         wandb.log_artifact(model_artifact, aliases=["final_model"])
 
     # need to fix this
-    log_feature_sparsity_path = f"{sae_group.cfg.checkpoint_path}/final_{sae_group.get_name()}_log_feature_sparsity.pt"
+    log_feature_sparsity_path = f"{sae_group.cfg.checkpoint_path}/final_{name_for_log}_log_feature_sparsity.pt"
     log_feature_sparsity = []
     for sae_id in range(len(sae_group)):
         feature_sparsity = act_freq_scores[sae_id] / n_frac_active_tokens[sae_id]
