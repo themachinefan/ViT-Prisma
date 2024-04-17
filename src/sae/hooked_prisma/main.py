@@ -454,7 +454,7 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
 
 
     
-def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, expansion_factor = 64, layers=9, context_size=197, model_name='vit_base_patch32_224'):
+def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, expansion_factor = 64, num_epochs=2, layers=9, context_size=197, dead_feature_window=5000,d_in=1024, model_name='vit_base_patch32_224', hook_point="blocks.{layer}.mlp.hook_pre", run_name=None):
 
     # assuming the same structure as here: https://www.kaggle.com/c/imagenet-object-localization-challenge/overview/description
     imagenet_train_path = os.path.join(imagenet_path, "ILSVRC/Data/CLS-LOC/train")
@@ -467,9 +467,9 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     # Data Generating Function (Model + Training Distibuion)
    # model_name = "gpt2-small",
     model_name = model_name, #
-    hook_point = "blocks.{layer}.mlp.hook_post", #"blocks.{layer}.hook_resid_pre",
+    hook_point = hook_point,
     hook_point_layer = layers, # 
-    d_in = 1024,# 768,
+    d_in = d_in,# 768,
     #dataset_path = "Skylion007/openwebtext", #
     #is_dataset_tokenized=False,
     
@@ -488,7 +488,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     # Activation Store Parameters
     n_batches_in_buffer = 32,
     #total_training_tokens = 1_000_000 * 300, #
-    total_training_images = 1_300_000,#1_300_000*3,
+    total_training_images = int(1_300_000*num_epochs),
 
 
     store_batch_size = 32, # num images
@@ -496,7 +496,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     # Dead Neurons and Sparsity
     use_ghost_grads=True,
     feature_sampling_window = 1000,
-    dead_feature_window=5000,
+    dead_feature_window=dead_feature_window,
    # dead_feature_threshold = 1e-6, # did not apper to be used in either future, (is it a different method than window?)
     
     # WANDB
@@ -504,7 +504,7 @@ def setup(checkpoint_path,imagenet_path, num_workers=0, pretrained_path=None, ex
     wandb_project= "vit_sae_training", #
     wandb_entity = None,
     wandb_log_frequency=100,
-    
+    run_name = run_name,
     # Misc
     device = "cuda",
     seed = 42,
@@ -581,30 +581,40 @@ if __name__ == "__main__":
     parser.add_argument("--eval",
                         action="store_true",
                         help="run evals")
-    
+
     parser.add_argument("--expansion_factor",
                         type=int,
                         default=64)
     parser.add_argument("--context_size",
                         type=int,
                         default=197)
-    
+    parser.add_argument("--d_in",
+                        type=int,
+                        default=1024)
     parser.add_argument("--num_workers",
                         type=int,
                         default=4)
     parser.add_argument("--model_name",
                         default="wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M")
+    parser.add_argument("--hook_point",
+                        default="blocks.{layer}.mlp.hook_pre")
     parser.add_argument("--layers",
                     type=int,
                     nargs="+",
                     default=[9])
-
+    parser.add_argument("--num_epochs",
+                        type=int,
+                        default=2)
+    parser.add_argument("--dead_feature_window",
+                        type=int,
+                        default=5000)
+    parser.add_argument("--run_name")
 
     parser.add_argument('--load', type=str, default=None, help='Pretrained SAE path')
     args = parser.parse_args()
 
     #TODO make note of when/if this changes... best to just make a new version tbh
-    cfg ,model, activations_loader, sae_group = setup(args.checkpoint_path,args.imagenet_path, pretrained_path=args.load, expansion_factor=args.expansion_factor, layers=args.layers, context_size=args.context_size, model_name=args.model_name ,num_workers=args.num_workers)
+    cfg ,model, activations_loader, sae_group = setup(args.checkpoint_path,args.imagenet_path, pretrained_path=args.load, expansion_factor=args.expansion_factor,layers=args.layers, context_size=args.context_size, model_name=args.model_name ,num_epochs=args.num_epochs,dead_feature_window=args.dead_feature_window,num_workers=args.num_workers, d_in=args.d_in, run_name =args.run_name, hook_point=args.hook_point)
 
     if cfg.log_to_wandb:
         wandb.init(project=cfg.wandb_project, config=cast(Any, cfg), name=cfg.run_name)
