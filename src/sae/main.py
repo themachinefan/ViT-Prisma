@@ -30,6 +30,7 @@ from sae_lens.training.sparse_autoencoder import (
     SPARSITY_PATH,
     SparseAutoencoder,
 )
+import re
 
 from sae.vision_evals import run_evals_vision
 from sae.vision_config import VisionModelRunnerConfig
@@ -368,7 +369,6 @@ def train_sae_group_on_vision_model(
         checkpoint_name = training_run_state.n_training_tokens
         _save_checkpoint(
             sae_group,
-            activation_store=activation_store,
             train_contexts=train_contexts,
             training_run_state=training_run_state,
             checkpoint_name=checkpoint_name,
@@ -378,7 +378,6 @@ def train_sae_group_on_vision_model(
     # save final sae group to checkpoints folder
     _save_checkpoint(
         sae_group,
-        activation_store=activation_store,
         train_contexts=train_contexts,
         training_run_state=training_run_state,
         checkpoint_name=f"final_{training_run_state.n_training_tokens}",
@@ -702,7 +701,7 @@ TRAINING_RUN_STATE_PATH = "training_run_state.pkl"
 SAE_CONTEXT_PATH = "ctx.safetensors"
 
 
-# we are not saving activation store unlike elsewhere.
+# we are not saving activation store unlike saelens.
 def _save_checkpoint(
     sae_group: SparseAutoencoderDictionary,
     train_contexts: dict[str, SAETrainContext],
@@ -717,9 +716,10 @@ def _save_checkpoint(
 
     training_run_state_path = f"{checkpoint_path}/{TRAINING_RUN_STATE_PATH}"
     training_run_state.save(training_run_state_path)
+    name_for_log = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
     if sae_group.cfg.log_to_wandb:
         training_run_state_artifact = wandb.Artifact(
-            f"{sae_group.get_name()}_training_run_state",
+            f"{name_for_log}_training_run_state",
             type="training_run_state",
             metadata=dict(sae_group.cfg.__dict__),
         )
@@ -746,7 +746,7 @@ def _save_checkpoint(
 
         if sae_group.cfg.log_to_wandb and os.path.exists(log_feature_sparsity_path):
             model_artifact = wandb.Artifact(
-                f"{sae_group.get_name()}",
+                f"{name_for_log}",
                 type="model",
                 metadata=dict(sae_group.cfg.__dict__),
             )
@@ -757,7 +757,7 @@ def _save_checkpoint(
             wandb.log_artifact(model_artifact, aliases=wandb_aliases)
 
             sparsity_artifact = wandb.Artifact(
-                f"{sae_group.get_name()}_log_feature_sparsity",
+                f"{name_for_log}_log_feature_sparsity",
                 type="log_feature_sparsity",
                 metadata=dict(sae_group.cfg.__dict__),
             )
