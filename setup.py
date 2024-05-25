@@ -13,6 +13,7 @@ install_requires = [
     'transformers', # Test dependency
     'scikit-learn', # Test dependency
     'datasets',
+    'python-dotenv',
 ]
 
 setup(
