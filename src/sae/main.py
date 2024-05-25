@@ -39,7 +39,7 @@ from sae.legacy_load import load_legacy_pt_file
 import csv
 
 
-
+# modified version of sae-lens code
 def train_sae_group_on_vision_model(
     model: HookedRootModule,
     sae_group: SparseAutoencoderDictionary,
@@ -239,11 +239,7 @@ def train_sae_group_on_vision_model(
     )
 
 
-
-
-
-
-
+# modified version of sae-lens code
 # we are not saving activation store unlike saelens.
 def _save_checkpoint(
     sae_group: SparseAutoencoderDictionary,
@@ -308,76 +304,6 @@ def _save_checkpoint(
             wandb.log_artifact(sparsity_artifact)
 
     return checkpoint_path
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
