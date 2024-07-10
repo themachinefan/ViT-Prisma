@@ -1,3 +1,21 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import torchvision
+from transformers import CLIPProcessor
+
 import os
 import signal
 from typing import Any, Optional, cast
@@ -15,332 +33,193 @@ from transformer_lens.hook_points import HookedRootModule
 
 from sae_lens import __version__
 
-from sae_lens.training.sae_group import SparseAutoencoderDictionary
-from sae_lens.training.sparse_autoencoder import (
-    SAE_CFG_PATH,
-    SAE_WEIGHTS_PATH,
-    SPARSITY_PATH,
-)
-from sae_lens.training.train_sae_on_language_model import (
-    SAETrainContext, SAETrainingRunState, TrainSAEGroupOutput,
-     get_total_training_tokens, _wandb_log_suffix, _build_train_context,
-     _init_sae_group_b_decs, _update_sae_lens_training_version, _train_step, _build_train_step_log_dict,
-     TRAINING_RUN_STATE_PATH, SAE_CONTEXT_PATH
-)
+# from sae_lens.training.sae_group import SparseAutoencoderDictionary
+# from sae_lens.training.sparse_autoencoder import (
+#     SAE_CFG_PATH,
+#     SAE_WEIGHTS_PATH,
+#     SPARSITY_PATH,
+# )
+# from sae_lens.training.train_sae_on_language_model import (
+#     SAETrainContext, SAETrainingRunState, TrainSAEGroupOutput,
+#      get_total_training_tokens, _wandb_log_suffix, _build_train_context,
+#      _init_sae_group_b_decs, _update_sae_lens_training_version, _train_step, _build_train_step_log_dict,
+#      TRAINING_RUN_STATE_PATH, SAE_CONTEXT_PATH
+# )
 
 import re
 
 from sae.vision_evals import run_evals_vision
 from sae.vision_config import VisionModelRunnerConfig
 from sae.vision_activations_store import VisionActivationsStore
-from sae.legacy_load import load_legacy_pt_file
 import csv
 
 
-def train_sae_group_on_vision_model(
-    model: HookedRootModule,
-    sae_group: SparseAutoencoderDictionary,
-    activation_store: VisionActivationsStore,
-    train_contexts: Optional[dict[str, SAETrainContext]] = None,
-    training_run_state: Optional[SAETrainingRunState] = None,
-    batch_size: int = 1024,
-    n_checkpoints: int = 0,
-    feature_sampling_window: int = 1000,  # how many training steps between resampling the features / considiring neurons dead
-    use_wandb: bool = False,
-    wandb_log_frequency: int = 50,
-    eval_every_n_wandb_logs: int = 100,
-    autocast: bool = False,
-) -> TrainSAEGroupOutput:
-    """
-    Trains a group of sparse autoencoders (SAEs) on a vision model's activations.
 
-    Args:
-        model (HookedRootModule): The vision model to extract activations from.
-        sae_group (SparseAutoencoderDictionary): Group of sparse autoencoders to be trained.
-        activation_store (VisionActivationsStore): Store for vision model activations.
-        train_contexts (Optional[dict[str, SAETrainContext]]): Optional training contexts for resuming training.
-        training_run_state (Optional[SAETrainingRunState]): Optional state for resuming training.
-        batch_size (int): Size of the training batch. Default is 1024.
-        n_checkpoints (int): Number of checkpoints to save during training. Default is 0.
-        feature_sampling_window (int): Number of training steps between resampling features. Default is 1000.
-        use_wandb (bool): Whether to use Weights & Biases for logging. Default is False.
-        wandb_log_frequency (int): Frequency of logging to Weights & Biases. Default is 50.
-        eval_every_n_wandb_logs (int): Frequency of evaluations based on Weights & Biases logs. Default is 100.
-        autocast (bool): Whether to use automatic mixed precision. Default is False.
+import json
+import logging
+import os
+import signal
+from typing import Any, cast
 
-    Returns:
-        TrainSAEGroupOutput: Output containing trained SAE group, checkpoint paths, and log feature sparsities.
+import torch
+import wandb
+from safetensors.torch import save_file
+from transformer_lens.hook_points import HookedRootModule
 
-    Raises:
-        ValueError: If train_contexts or training_run_state are None when resuming training.
-        InterruptedException: If training is interrupted by a signal.
+from sae_lens.config import HfDataset, LanguageModelSAERunnerConfig
+from sae_lens.load_model import load_model
+from sae_lens.sae import SAE_CFG_PATH, SAE_WEIGHTS_PATH, SPARSITY_PATH
+from sae_lens.training.activations_store import ActivationsStore
+from sae_lens.training.geometric_median import compute_geometric_median
+from sae_lens.training.sae_trainer import SAETrainer
+from sae_lens.sae_training_runner import SAETrainingRunner
+from sae_lens.training.training_sae import TrainingSAE, TrainingSAEConfig, handle_config_defaulting, read_sae_from_disk, DTYPE_MAP, SAE_CFG_PATH, SAE_WEIGHTS_PATH
+import json 
 
-    """
+class InterruptedException(Exception):
+    pass
+
+
+def interrupt_callback(sig_num: Any, stack_frame: Any):
+    raise InterruptedException()
+
+
+
+# same as saelens but replaceing run_evals with run_evals_vision. Also fixes issue with load from pretrain
+class VisionSAETrainer(SAETrainer):
+    @torch.no_grad()
+    def _run_and_log_evals(self):
+        # record loss frequently, but not all the time.
+        if (self.n_training_steps + 1) % (
+            self.cfg.wandb_log_frequency * self.cfg.eval_every_n_wandb_logs
+        ) == 0:
+            self.sae.eval()
+            
+            #TODO update for newer features. Fix for clip
+            run_evals_vision(
+                    self.sae,
+                    self.activation_store,
+                    self.model,
+                    self.n_training_steps,
+                )
+
+            extra_eval_metrics = {}
+            W_dec_norm_dist = self.sae.W_dec.norm(dim=1).detach().cpu().numpy()
+            extra_eval_metrics["weights/W_dec_norms"] = wandb.Histogram(W_dec_norm_dist)  # type: ignore
+
+            if self.sae.cfg.architecture == "standard":
+                b_e_dist = self.sae.b_enc.detach().cpu().numpy()
+                extra_eval_metrics["weights/b_e"] = wandb.Histogram(b_e_dist)  # type: ignore
+            elif self.sae.cfg.architecture == "gated":
+                b_gate_dist = self.sae.b_gate.detach().cpu().numpy()
+                extra_eval_metrics["weights/b_gate"] = wandb.Histogram(b_gate_dist)  # type: ignore
+                b_mag_dist = self.sae.b_mag.detach().cpu().numpy()
+                extra_eval_metrics["weights/b_mag"] = wandb.Histogram(b_mag_dist)  # type: ignore
+
+            wandb.log(
+                extra_eval_metrics,
+                step=self.n_training_steps,
+            )
+            self.sae.train()
+
+
+# normally handled in TrainingSAE but I was running into an issue which I fix below (alternative would be to modify TraniningSAEConfig)
+def load_sae(
+        path: str,
+        device: str = "cpu",
+        dtype: str = "float32",
+    ) -> TrainingSAE:
+
+        # get the config
+        config_path = os.path.join(path, SAE_CFG_PATH)
+        with open(config_path, "r") as f:
+            cfg_dict = json.load(f)
+        cfg_dict = handle_config_defaulting(cfg_dict)
+
+        weight_path = os.path.join(path, SAE_WEIGHTS_PATH)
+        cfg_dict, state_dict = read_sae_from_disk(
+            cfg_dict=cfg_dict,
+            weight_path=weight_path,
+            device=device,
+            dtype=DTYPE_MAP[dtype],
+        )
+
+
+        # added this code which removes any unwanted keys 
+        dummy_cfg = VisionModelRunnerConfig().get_vision_training_sae_cfg_dict()
+        for key in list(cfg_dict.keys()):
+            if key not in dummy_cfg.keys():
+                del cfg_dict[key]
         
-    total_training_tokens = get_total_training_tokens(sae_group=sae_group)
-    _update_sae_lens_training_version(sae_group)
-    total_training_steps = total_training_tokens // batch_size
+        sae_cfg = TrainingSAEConfig.from_dict(cfg_dict)
 
-    checkpoint_thresholds = []
-    if n_checkpoints > 0:
-        checkpoint_thresholds = list(
-            range(0, total_training_tokens, total_training_tokens // n_checkpoints)
-        )[1:]
+        sae = TrainingSAE(sae_cfg)
+        sae.load_state_dict(state_dict)
 
-    all_layers = sae_group.cfg.hook_point_layer
-    if not isinstance(all_layers, list):
-        all_layers = [all_layers]
-
-    pbar = tqdm(total=total_training_tokens, desc="Training SAE")
-
-    # not resuming
-    if training_run_state is None and train_contexts is None:
-        train_contexts = {
-            name: _build_train_context(sae, total_training_steps)
-            for name, sae in sae_group.autoencoders.items()
-        }
-        training_run_state = SAETrainingRunState()
-        _init_sae_group_b_decs(sae_group, activation_store, all_layers)
-    # resuming
-    else:
-        if train_contexts is None:
-            raise ValueError(
-                "train_contexts is None, when resuming, pass in training_run_state and train_contexts"
-            )
-        if training_run_state is None:
-            raise ValueError(
-                "training_run_state is None, when resuming, pass in training_run_state and train_contexts"
-            )
-        pbar.update(training_run_state.n_training_tokens)
-        training_run_state.set_random_state()
-
-    class InterruptedException(Exception):
-        pass
-
-    def interrupt_callback(sig_num: Any, stack_frame: Any):
-        raise InterruptedException()
-
-    try:
-        # signal handlers (if preempted)
-        signal.signal(signal.SIGINT, interrupt_callback)
-        signal.signal(signal.SIGTERM, interrupt_callback)
-
-        # Estimate norm scaling factor if necessary
-        # TODO(tomMcGrath): this is a bodge and should be moved back inside a class
-        if activation_store.normalize_activations:
-            print("Estimating activation norm")
-            n_batches_for_norm_estimate = int(1e3)
-            norms_per_batch = []
-            for _ in tqdm(range(n_batches_for_norm_estimate)):
-                acts = activation_store.next_batch()
-                norms_per_batch.append(acts.norm(dim=-1).mean().item())
-            mean_norm = np.mean(norms_per_batch)
-            scaling_factor = np.sqrt(activation_store.d_in) / mean_norm
-            activation_store.estimated_norm_scaling_factor = scaling_factor
-
-        # Train loop
-        while training_run_state.n_training_tokens < total_training_tokens:
-            # Do a training step.
-            layer_acts = activation_store.next_batch()
-            training_run_state.n_training_tokens += batch_size
-
-            mse_losses: list[torch.Tensor] = []
-            l1_losses: list[torch.Tensor] = []
-
-            for name, sparse_autoencoder in sae_group.autoencoders.items():
-                ctx = train_contexts[name]
-                wandb_suffix = _wandb_log_suffix(sae_group.cfg, sparse_autoencoder.cfg)
-                step_output = _train_step(
-                    sparse_autoencoder=sparse_autoencoder,
-                    layer_acts=layer_acts,
-                    ctx=ctx,
-                    feature_sampling_window=feature_sampling_window,
-                    use_wandb=use_wandb,
-                    n_training_steps=training_run_state.n_training_steps,
-                    all_layers=all_layers,
-                    batch_size=batch_size,
-                    wandb_suffix=wandb_suffix,
-                    autocast=autocast,
-                )
-                mse_losses.append(step_output.mse_loss)
-                l1_losses.append(step_output.l1_loss)
-
-                if use_wandb:
-                    with torch.no_grad():
-                        if (
-                            training_run_state.n_training_steps + 1
-                        ) % wandb_log_frequency == 0:
-                            wandb.log(
-                                _build_train_step_log_dict(
-                                    sparse_autoencoder,
-                                    step_output,
-                                    ctx,
-                                    wandb_suffix,
-                                    training_run_state.n_training_tokens,
-                                ),
-                                step=training_run_state.n_training_steps,
-                            )
-
-                        # record loss frequently, but not all the time.
-                        if (training_run_state.n_training_steps + 1) % (
-                            wandb_log_frequency * eval_every_n_wandb_logs
-                        ) == 0:
-                            sparse_autoencoder.eval()
-                             #TODO fix for clip!!
-                            try: 
-                                run_evals_vision(
-                                    sparse_autoencoder,
-                                    activation_store,
-                                    model,
-                                    training_run_state.n_training_steps,
-                                    suffix=wandb_suffix,
-                                )
-                            except:
-                                pass
-                            sparse_autoencoder.train()
-
-            # checkpoint if at checkpoint frequency
-            if (
-                checkpoint_thresholds
-                and training_run_state.n_training_tokens > checkpoint_thresholds[0]
-            ):
-                _save_checkpoint(
-                    sae_group,
-                    train_contexts=train_contexts,
-                    training_run_state=training_run_state,
-                    checkpoint_name=training_run_state.n_training_tokens,
-                )
-                checkpoint_thresholds.pop(0)
-
-            ###############
-
-            training_run_state.n_training_steps += 1
-            if training_run_state.n_training_steps % 100 == 0:
-                pbar.set_description(
-                    f"{training_run_state.n_training_steps}| MSE Loss {torch.stack(mse_losses).mean().item():.3f} | L1 {torch.stack(l1_losses).mean().item():.3f}"
-                )
-            pbar.update(batch_size)
-
-            ### If n_training_tokens > sae_group.cfg.training_tokens, then we should switch to fine-tuning (if we haven't already)
-            if (not training_run_state.started_fine_tuning) and (
-                training_run_state.n_training_tokens > sae_group.cfg.training_tokens
-            ):
-                training_run_state.started_fine_tuning = True
-                for name, sparse_autoencoder in sae_group.autoencoders.items():
-                    ctx = train_contexts[name]
-                    # this should turn grads on for the scaling factor and other parameters.
-                    ctx.begin_finetuning(sae_group.autoencoders[name])
-
-    except (KeyboardInterrupt, InterruptedException):
-        print("interrupted, saving progress")
-        checkpoint_name = training_run_state.n_training_tokens
-        _save_checkpoint(
-            sae_group,
-            train_contexts=train_contexts,
-            training_run_state=training_run_state,
-            checkpoint_name=checkpoint_name,
-        )
-        print("done saving")
-        raise
-    # save final sae group to checkpoints folder
-    _save_checkpoint(
-        sae_group,
-        train_contexts=train_contexts,
-        training_run_state=training_run_state,
-        checkpoint_name=f"final_{training_run_state.n_training_tokens}",
-        wandb_aliases=["final_model"],
-    )
-
-    log_feature_sparsities = {
-        name: ctx.log_feature_sparsity for name, ctx in train_contexts.items()
-    }
-
-    return TrainSAEGroupOutput(
-        sae_group=sae_group,
-        checkpoint_paths=training_run_state.checkpoint_paths,
-        log_feature_sparsities=log_feature_sparsities,
-    )
+        return sae
 
 
-# we are not saving activation store unlike saelens.
-def _save_checkpoint(
-    sae_group: SparseAutoencoderDictionary,
-    train_contexts: dict[str, SAETrainContext],
-    training_run_state: SAETrainingRunState,
-    checkpoint_name: int | str,
-    wandb_aliases: list[str] | None = None,
-) -> str:
+# same as saelens but custom init and using VisionSAETrainer
+class VisionSAETrainingRunner(SAETrainingRunner):
     """
-    Saves a checkpoint of the current training state of the sparse autoencoders.
-
-    Args:
-        sae_group (SparseAutoencoderDictionary): Group of sparse autoencoders.
-        train_contexts (dict[str, SAETrainContext]): Training contexts for each autoencoder.
-        training_run_state (SAETrainingRunState): State of the current training run.
-        checkpoint_name (int | str): Name or identifier for the checkpoint.
-        wandb_aliases (list[str] | None): Optional list of aliases for Weights & Biases logging.
-
-    Returns:
-        str: Path to the saved checkpoint.
-
+    Class to run the training of a Sparse Autoencoder (SAE) on a TransformerLens model.
     """
 
+    cfg: VisionModelRunnerConfig
+    model: HookedRootModule
+    sae: TrainingSAE
+    activations_store: ActivationsStore
 
-    checkpoint_path = f"{sae_group.cfg.checkpoint_path}/{checkpoint_name}"
-    training_run_state.checkpoint_paths.append(checkpoint_path)
-    os.makedirs(checkpoint_path, exist_ok=True)
+    def __init__(
+        self,
+        cfg: VisionModelRunnerConfig,
+        model: HookedViT,
+        activations_store:VisionActivationsStore,
+        sae:TrainingSAE,
 
-    training_run_state_path = f"{checkpoint_path}/{TRAINING_RUN_STATE_PATH}"
-    training_run_state.save(training_run_state_path)
-    name_for_log = re.sub(r'[^a-zA-Z0-9._-]', '_', sae_group.get_name())
-    if sae_group.cfg.log_to_wandb:
-        training_run_state_artifact = wandb.Artifact(
-            f"{name_for_log}_training_run_state",
-            type="training_run_state",
-            metadata=dict(sae_group.cfg.__dict__),
+    ):
+        assert cfg.eval_batch_size_prompts is None, "eval_batch_size_prompts not implemented for vision! (argument is being used for hacky override)"
+        cfg.eval_batch_size_prompts = "override"
+        self.cfg = cfg
+
+        self.model = model
+        self.activations_store = activations_store
+
+        self.sae = sae 
+        if cfg.from_pretrained_path is  None:
+            self._init_sae_group_b_decs()
+
+
+
+    def run(self):
+        """
+        Run the training of the SAE.
+        """
+
+        if self.cfg.log_to_wandb:
+            wandb.init(
+                project=self.cfg.wandb_project,
+                config=cast(Any, self.cfg),
+                name=self.cfg.run_name,
+                id=self.cfg.wandb_id,
+            )
+
+        trainer = VisionSAETrainer(
+            model=self.model,
+            sae=self.sae,
+            activation_store=self.activations_store,
+            save_checkpoint_fn=self.save_checkpoint,
+            cfg=self.cfg,
         )
-        training_run_state_artifact.add_file(training_run_state_path)
-        # TODO: should these have aliases=wandb_aliases?
-        wandb.log_artifact(training_run_state_artifact)
 
+        self._compile_if_needed()
+        sae = self.run_trainer_with_interruption_handling(trainer)
 
-    for name, sae in sae_group.autoencoders.items():
+        if self.cfg.log_to_wandb:
+            wandb.finish()
 
-        ctx = train_contexts[name]
-        path = f"{checkpoint_path}/{name}"
-        os.makedirs(path, exist_ok=True)
-        ctx_path = f"{path}/{SAE_CONTEXT_PATH}"
-        ctx.save(ctx_path)
+        return sae
 
-        if sae.normalize_sae_decoder:
-            sae.set_decoder_norm_to_unit_norm()
-        sae.save_model(path)
-        log_feature_sparsities = {"sparsity": ctx.log_feature_sparsity}
-
-        log_feature_sparsity_path = f"{path}/{SPARSITY_PATH}"
-        save_file(log_feature_sparsities, log_feature_sparsity_path)
-
-        if sae_group.cfg.log_to_wandb and os.path.exists(log_feature_sparsity_path):
-            model_artifact = wandb.Artifact(
-                f"{name_for_log}",
-                type="model",
-                metadata=dict(sae_group.cfg.__dict__),
-            )
-            model_artifact.add_file(f"{path}/{SAE_WEIGHTS_PATH}")
-            model_artifact.add_file(f"{path}/{SAE_CFG_PATH}")
-            if sae_group.cfg.log_optimizer_state_to_wandb:
-                model_artifact.add_file(ctx_path)
-            wandb.log_artifact(model_artifact, aliases=wandb_aliases)
-
-            sparsity_artifact = wandb.Artifact(
-                f"{name_for_log}_log_feature_sparsity",
-                type="log_feature_sparsity",
-                metadata=dict(sae_group.cfg.__dict__),
-            )
-            sparsity_artifact.add_file(log_feature_sparsity_path)
-            wandb.log_artifact(sparsity_artifact)
-
-    return checkpoint_path
 
 
 def get_imagenet_index_to_name(imagenet_path):
@@ -420,31 +299,12 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
 
 
 def setup(cfg, setup_args, legacy_load=False):
-
     # assuming the same structure as here: https://www.kaggle.com/c/imagenet-object-localization-challenge/overview/description
     imagenet_train_path = os.path.join(setup_args['imagenet_path']['value'], "ILSVRC/Data/CLS-LOC/train")
     imagenet_val_path  =os.path.join(setup_args['imagenet_path']['value'], "ILSVRC/Data/CLS-LOC/val")
     imagenet_val_labels = os.path.join(setup_args['imagenet_path']['value'], "LOC_val_solution.csv")
     imagenet_label_strings = os.path.join(setup_args['imagenet_path']['value'], "LOC_synset_mapping.txt" )
-
-    cfg.training_tokens = int(1_300_000*setup_args['num_epochs']) * cfg.context_size
-
-    #TODO support cfg.resume
-    if cfg.from_pretrained_path is not None:
-        if legacy_load:
-            sae_group = load_legacy_pt_file(cfg.from_pretrained_path)
-        else:
-            sae_group = SparseAutoencoderDictionary.load_from_pretrained(cfg.from_pretrained_path)
-    else:
-        sae_group = SparseAutoencoderDictionary(cfg)
-
-
-    model = HookedViT.from_pretrained(cfg.model_name, is_timm=False, is_clip=True)
-    model.to(cfg.device)
-
-
-    import torchvision
-    from transformers import CLIPProcessor
+   
     clip_processor = CLIPProcessor.from_pretrained(cfg.model_name)
     data_transforms = torchvision.transforms.Compose([
         torchvision.transforms.Resize((224, 224)),
@@ -455,10 +315,36 @@ def setup(cfg, setup_args, legacy_load=False):
     ])
 
     imagenet1k_data = torchvision.datasets.ImageFolder(imagenet_train_path, transform=data_transforms)
-    
     imagenet1k_data_val = ImageNetValidationDataset(imagenet_val_path,imagenet_label_strings, imagenet_val_labels ,data_transforms)
 
-    activations_loader = VisionActivationsStore(
+    
+    cfg.training_tokens = int(len(imagenet1k_data)*setup_args['num_epochs']) * cfg.context_size
+
+     #TODO support cfg.resume
+    if cfg.from_pretrained_path is not None:
+
+        if legacy_load:
+            from sae.legacy_load import load_legacy_pt_file
+            sae = load_legacy_pt_file(cfg.from_pretrained_path)
+        else:
+            sae = load_sae(
+                cfg.from_pretrained_path, cfg.device
+            )
+    else:
+        sae = TrainingSAE(
+            TrainingSAEConfig.from_dict(
+                cfg.get_vision_training_sae_cfg_dict(),
+            )
+        )
+
+    model = HookedViT.from_pretrained(cfg.model_name, is_timm=False, is_clip=True)
+    model.to(cfg.device)
+
+
+
+    
+
+    activations_store = VisionActivationsStore(
         cfg,
         model,
         imagenet1k_data,
@@ -467,41 +353,30 @@ def setup(cfg, setup_args, legacy_load=False):
         eval_dataset=imagenet1k_data_val,
     )
 
-    return model, activations_loader, sae_group
+    return model, activations_store, sae
 
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="config.yaml", help="path to training config")
+    parser.add_argument("--legacy_load", action="store_true", help="use to load models trained with a older version of this code")
     args = parser.parse_args()
 
     setup_args = yaml.safe_load(open(args.config, 'r'))['setup_arguments']
 
     cfg = VisionModelRunnerConfig.from_yaml(args.config)
 
-    model, activations_loader, sae_group = setup(cfg, setup_args, legacy_load=False)
+    model, activations_store, sae = setup(cfg, setup_args, legacy_load=args.legacy_load)
 
     if cfg.log_to_wandb:
         wandb.init(project=cfg.wandb_project, config=cast(Any, cfg), name=cfg.run_name)
 
 
     # train SAE
-    train_sae_group_on_vision_model(
-        model,
-        sae_group,
-        activations_loader,
-        train_contexts=None, #TODO load checkpoints correctly to match saelens v2.1.3 lm_runner!
-        training_run_state=None,  #TODO load checkpoints correctly to match saelens v2.1.3 lm_runner!
-        n_checkpoints=cfg.n_checkpoints,
-        batch_size=cfg.train_batch_size_tokens,
-        feature_sampling_window=cfg.feature_sampling_window,
-        use_wandb=cfg.log_to_wandb,
-        wandb_log_frequency=cfg.wandb_log_frequency,
-        eval_every_n_wandb_logs=cfg.eval_every_n_wandb_logs,
-        autocast=cfg.autocast,
+        
 
-    )
+    VisionSAETrainingRunner(cfg,model,activations_store,sae).run( )
+    
 
-    if cfg.log_to_wandb:
-        wandb.finish()
+

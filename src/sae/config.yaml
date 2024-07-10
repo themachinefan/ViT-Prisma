@@ -10,11 +10,11 @@ arguments:
   context_size: 197
   d_in: 1024
   model_name: "wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M"
-  hook_point: "blocks.{layer}.mlp.hook_pre"
+  hook_name: "blocks.9.mlp.hook_pre"
+  hook_layer: 9
   dead_feature_window: 5000
   use_ghost_grads: True
   feature_sampling_window: 1000
-  layers: [9]
   from_pretrained_path: null
 
 
@@ -28,6 +28,7 @@ arguments:
 
   n_batches_in_buffer: 32
   store_batch_size: 32
+  normalize_activations: "none"  # not implemented for vision
 
   log_to_wandb: True
   wandb_project: "vit_sae_training"
@@ -36,8 +37,7 @@ arguments:
   eval_every_n_wandb_logs: 10
   run_name: nulls
 
-  device: "mps"
+  device: "cuda"
   seed: 42
   n_checkpoints: 10
   checkpoint_path: null
-  dtype: "torch.float32"

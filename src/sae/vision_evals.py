@@ -9,19 +9,31 @@ from transformer_lens import HookedTransformer
 from transformer_lens.utils import get_act_name
 
 from sae.vision_activations_store import VisionActivationsStore
-from sae_lens.training.sparse_autoencoder import SparseAutoencoder
-from sae_lens.training.evals import zero_ablate_hook, kl_divergence_attention
 import torch.nn.functional as F
+# Taken from SAELens but adapted slightly for vision. #TODO adapt for CLIP model!
 
+
+
+
+
+def zero_ablate_hook(activations: torch.Tensor, hook: Any):
+    activations = torch.zeros_like(activations)
+    return activations
+
+
+def kl_divergence_attention(y_true: torch.Tensor, y_pred: torch.Tensor):
+    # Compute log probabilities for KL divergence
+    log_y_true = torch.log2(y_true + 1e-10)
+    log_y_pred = torch.log2(y_pred + 1e-10)
+
+    return y_true * (log_y_true - log_y_pred)
 
 @torch.no_grad()
-# similar to run_evals for language but adapted slightly for vision. #TODO adapt for CLIP model!
 def run_evals_vision(
-    sparse_autoencoder: SparseAutoencoder,
+    sparse_autoencoder,
     activation_store: VisionActivationsStore,
     model: HookedTransformer,
     n_training_steps: int,
-    suffix: str = "",
 ):
     """
     Runs evaluations on a vision model using sparse autoencoders and logs metrics.
@@ -30,20 +42,17 @@ def run_evals_vision(
     It evaluates the model by reconstructing activations and logging various metrics to Weights & Biases.
 
     Args:
-        sparse_autoencoder (SparseAutoencoder): The sparse autoencoder to be evaluated.
+        sparse_autoencoder: The sparse autoencoder to be evaluated.
         activation_store (VisionActivationsStore): Store for vision model activations.
         model (HookedTransformer): The vision model to be evaluated.
         n_training_steps (int): The current number of training steps.
-        suffix (str, optional): Suffix for logging metrics. Default is "".
 
     """
     
-    hook_point = sparse_autoencoder.cfg.hook_point
-    hook_point_layer = sparse_autoencoder.cfg.hook_point_layer
-    hook_point_head_index = sparse_autoencoder.cfg.hook_point_head_index
-
+    hook_point = sparse_autoencoder.cfg.hook_name
+    hook_point_head_index = sparse_autoencoder.cfg.hook_head_index
     ### Evals
-    eval_tokens = activation_store.get_batch_tokens()
+    eval_tokens = activation_store.get_val_batch_tokens()[0]
 
     #TODO this was set up with classifier vit in mind but hasn't been modified for clip
     # Get Reconstruction Score
@@ -63,20 +72,20 @@ def run_evals_vision(
     # get cache
     _, cache = model.run_with_cache(
         eval_tokens,
-        names_filter=[get_act_name("pattern", hook_point_layer), hook_point],
+        names_filter=[hook_point],
     )
 
     # get act
-    if sparse_autoencoder.cfg.hook_point_head_index is not None:
-        original_act = cache[sparse_autoencoder.cfg.hook_point][
-            :, :, sparse_autoencoder.cfg.hook_point_head_index
+    if hook_point_head_index is not None:
+        original_act = cache[hook_point][
+            :, :, hook_point_head_index
         ]
     else:
-        original_act = cache[sparse_autoencoder.cfg.hook_point]
+        original_act = cache[hook_point]
 
-    sae_out, _feature_acts, _, _, _, _ = sparse_autoencoder(original_act)
+    sae_out = sparse_autoencoder(original_act)
     patterns_original = (
-        cache[get_act_name("pattern", hook_point_layer)][:, hook_point_head_index]
+        cache[hook_point][:, hook_point_head_index]
         .detach()
         .cpu()
     )
@@ -92,8 +101,8 @@ def run_evals_vision(
     wandb.log(
         {
             # l2 norms
-            f"metrics/l2_norm{suffix}": l2_norm_out.mean().item(),
-            f"metrics/l2_ratio{suffix}": l2_norm_ratio.mean().item(),
+            f"metrics/l2_norm": l2_norm_out.mean().item(),
+            f"metrics/l2_ratio": l2_norm_ratio.mean().item(),
             # CE Loss
             # f"metrics/CE_loss_score{suffix}": recons_score,
             # f"metrics/ce_loss_without_sae{suffix}": ntp_loss,
@@ -103,7 +112,6 @@ def run_evals_vision(
         step=n_training_steps,
     )
 
-    head_index = sparse_autoencoder.cfg.hook_point_head_index
 
     def standard_replacement_hook(activations: torch.Tensor, hook: Any):
         """
@@ -119,7 +127,7 @@ def run_evals_vision(
             torch.Tensor: The activations after being processed by the sparse autoencoder.
         """
 
-        activations = sparse_autoencoder.forward(activations)[0].to(activations.dtype)
+        activations = sparse_autoencoder.forward(activations).to(activations.dtype)
         return activations
 
     def head_replacement_hook(activations: torch.Tensor, hook: Any):
@@ -136,24 +144,23 @@ def run_evals_vision(
             torch.Tensor: The activations after being processed by the sparse autoencoder for the specified head.
         """
                 
-        new_actions = sparse_autoencoder.forward(activations[:, :, head_index])[0].to(
+        new_actions = sparse_autoencoder.forward(activations[:, :, hook_point_head_index]).to(
             activations.dtype
         )
-        activations[:, :, head_index] = new_actions
+        activations[:, :, hook_point_head_index] = new_actions
         return activations
 
-    head_index = sparse_autoencoder.cfg.hook_point_head_index
     replacement_hook = (
-        standard_replacement_hook if head_index is None else head_replacement_hook
+        standard_replacement_hook if hook_point_head_index is None else head_replacement_hook
     )
 
     # get attn when using reconstructed activations
     with model.hooks(fwd_hooks=[(hook_point, partial(replacement_hook))]):
         _, new_cache = model.run_with_cache(
-            eval_tokens, names_filter=[get_act_name("pattern", hook_point_layer)]
+            eval_tokens, names_filter=[hook_point]
         )
         patterns_reconstructed = (
-            new_cache[get_act_name("pattern", hook_point_layer)][
+            new_cache[hook_point][
                 :, hook_point_head_index
             ]
             .detach()
@@ -164,10 +171,10 @@ def run_evals_vision(
     # get attn when using reconstructed activations
     with model.hooks(fwd_hooks=[(hook_point, partial(zero_ablate_hook))]):
         _, zero_ablation_cache = model.run_with_cache(
-            eval_tokens, names_filter=[get_act_name("pattern", hook_point_layer)]
+            eval_tokens, names_filter=[hook_point]
         )
         patterns_ablation = (
-            zero_ablation_cache[get_act_name("pattern", hook_point_layer)][
+            zero_ablation_cache[hook_point][
                 :, hook_point_head_index
             ]
             .detach()
@@ -175,7 +182,7 @@ def run_evals_vision(
         )
         del zero_ablation_cache
 
-    if sparse_autoencoder.cfg.hook_point_head_index:
+    if sparse_autoencoder.cfg.hook_head_index:
         kl_result_reconstructed = kl_divergence_attention(
             patterns_original, patterns_reconstructed
         )
@@ -189,14 +196,14 @@ def run_evals_vision(
         if wandb.run is not None:
             wandb.log(
                 {
-                    f"metrics/kldiv_reconstructed{suffix}": kl_result_reconstructed.mean().item(),
-                    f"metrics/kldiv_ablation{suffix}": kl_result_ablation.mean().item(),
+                    f"metrics/kldiv_reconstructed": kl_result_reconstructed.mean().item(),
+                    f"metrics/kldiv_ablation": kl_result_ablation.mean().item(),
                 },
                 step=n_training_steps,
             )
 
 def recons_loss_batched(
-    sparse_autoencoder: SparseAutoencoder,
+    sparse_autoencoder,
     model: HookedTransformer,
     activation_store: VisionActivationsStore,
     n_batches: int = 100,
@@ -205,7 +212,7 @@ def recons_loss_batched(
     Computes reconstruction loss metrics for a given number of batches using a sparse autoencoder and vision model.
 
     Args:
-        sparse_autoencoder (SparseAutoencoder): The sparse autoencoder used for reconstruction.
+        sparse_autoencoder: The sparse autoencoder used for reconstruction.
         model (HookedTransformer): The vision model from which activations are obtained.
         activation_store (VisionActivationsStore): Store for vision model activations.
         n_batches (int, optional): The number of batches to compute the reconstruction loss over. Default is 100.
@@ -239,7 +246,7 @@ def recons_loss_batched(
 
 @torch.no_grad()
 def get_recons_loss(
-    sparse_autoencoder: SparseAutoencoder,
+    sparse_autoencoder,
     model: HookedTransformer,
     batch_tokens: torch.Tensor,
     labels:torch.Tensor
@@ -248,7 +255,7 @@ def get_recons_loss(
     Computes reconstruction loss and related metrics for a given batch of tokens and labels using a sparse autoencoder and vision model.
 
     Args:
-        sparse_autoencoder (SparseAutoencoder): The sparse autoencoder used for reconstruction.
+        sparse_autoencoder: The sparse autoencoder used for reconstruction.
         model (HookedTransformer): The vision model from which activations are obtained.
         batch_tokens (torch.Tensor): A batch of tokenized inputs for the vision model.
         labels (torch.Tensor): Ground truth labels for the inputs.
@@ -285,7 +292,7 @@ def get_recons_loss(
             torch.Tensor: The activations after being processed by the sparse autoencoder.
         """
 
-        activations = sparse_autoencoder.forward(activations)[0].to(activations.dtype)
+        activations = sparse_autoencoder.forward(activations).to(activations.dtype)
         return activations
 
     def head_replacement_hook(activations: torch.Tensor, hook: Any):
@@ -302,7 +309,7 @@ def get_recons_loss(
             torch.Tensor: The activations after being processed by the sparse autoencoder for the specified head.
         """
 
-        new_activations = sparse_autoencoder.forward(activations[:, :, head_index])[0].to(activations.dtype)
+        new_activations = sparse_autoencoder.forward(activations[:, :, head_index]).to(activations.dtype)
         activations[:, :, head_index] = new_activations
         return activations
 
