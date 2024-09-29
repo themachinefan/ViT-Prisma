@@ -26,6 +26,9 @@ from vit_prisma.sae.training.geometric_median import compute_geometric_median # 
 import math
 
 
+
+from vit_prisma.sae.jump_relu import JumpReLUFunction, StepFunction
+
 class SparseAutoencoder(HookedRootModule):
     """ """
 
@@ -74,6 +77,14 @@ class SparseAutoencoder(HookedRootModule):
             torch.zeros(self.d_in, dtype=self.dtype, device=self.device)
         )
 
+
+
+        # New jump relu weight!
+        if self.cfg.use_jump_relu:
+            self.log_theta = nn.Parameter(torch.ones(self.d_sae, dtype=self.dtype, device=self.device)*math.log(self.cfg.jump_relu_threshold_init))
+            self.register_buffer("bandwidth", torch.tensor(self.cfg.jump_relu_bandwidth, dtype=self.dtype, device=self.device))
+
+
         self.hook_sae_in = HookPoint()
         self.hook_hidden_pre = HookPoint()
         self.hook_hidden_post = HookPoint()
@@ -87,6 +98,21 @@ class SparseAutoencoder(HookedRootModule):
             #  we need to scale the norm of the input and store the scaling factor
             def run_time_activation_norm_fn_in(x: torch.Tensor) -> torch.Tensor:
                 self.x_norm_coeff = (self.cfg.d_in**0.5) / x.norm(dim=-1, keepdim=True)
+                x = x * self.x_norm_coeff
+                return x
+
+            def run_time_activation_norm_fn_out(x: torch.Tensor) -> torch.Tensor:  #
+                x = x / self.x_norm_coeff
+                del self.x_norm_coeff  # prevents reusing
+                return x
+
+            self.run_time_activation_norm_fn_in = run_time_activation_norm_fn_in
+            self.run_time_activation_norm_fn_out = run_time_activation_norm_fn_out
+        elif self.cfg.normalize_activations == "constant_norm_one_rescale":
+
+            #  we need to scale the norm of the input and store the scaling factor
+            def run_time_activation_norm_fn_in(x: torch.Tensor) -> torch.Tensor:
+                self.x_norm_coeff = 1/ x.norm(dim=-1, keepdim=True)
                 x = x * self.x_norm_coeff
                 return x
 
@@ -179,7 +205,15 @@ class SparseAutoencoder(HookedRootModule):
             )
             + self.b_enc
         )
-        feature_acts = self.hook_hidden_post(self.activation_fn(hidden_pre))
+
+
+        if self.cfg.use_jump_relu:
+            # first take a regluar relu. (see paper for why)
+            hidden_pre_relu = torch.nn.functional.relu(hidden_pre)
+            threshold = torch.exp(self.log_theta)
+            feature_acts = self.hook_hidden_post(JumpReLUFunction.apply(hidden_pre_relu, threshold, self.bandwidth))
+        else:
+            feature_acts = self.hook_hidden_post(self.activation_fn(hidden_pre))
 
         sae_out = self.hook_sae_out(
             einops.einsum(
@@ -235,9 +269,11 @@ class SparseAutoencoder(HookedRootModule):
 
 
         mse_loss = mse_loss.mean()
-        sparsity = feature_acts.norm(p=self.lp_norm, dim=1).mean(dim=(0,))
-        
-        if self.cfg.activation_fn_str != "topk":
+        if self.cfg.use_jump_relu:
+            l1_loss = self.l1_coefficient * StepFunction.apply(feature_acts, threshold, self.bandwidth).sum(dim=-1).mean(dim=(0,)) # secretly l0! TODO should rename to 'sparsity_loss' or something so that it's consistent!
+            loss = mse_loss + l1_loss + mse_loss_ghost_resid
+        elif self.cfg.activation_fn_str != "topk":
+            sparsity = feature_acts.norm(p=self.lp_norm, dim=1).mean(dim=(0,))
             l1_loss = self.l1_coefficient * sparsity
             loss = mse_loss + l1_loss + mse_loss_ghost_resid
         elif self.cfg.activation_fn_str == "topk": # Don't use L1 loss with topk

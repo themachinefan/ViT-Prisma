@@ -37,7 +37,7 @@ class RunnerConfig(ABC):
     # New changes
     max_grad_norm: float = 1.0 # For gradient clipping, set to None to turn off
     initialization_method: str = "encoder_transpose_decoder" # or independent
-    normalize_activations: str = "layer_norm"
+    normalize_activations: str = "layer_norm" #none layer_norm or constant_norm_rescale or constant_norm_one_rescale
 
     # Activation Store Parameters
     n_batches_in_buffer: int = 20
@@ -121,6 +121,9 @@ class VisionModelSAERunnerConfig(RunnerConfig):
     wandb_entity: Optional[str] = None
     wandb_log_frequency: int = 100
 
+    use_jump_relu = True # use jump relu (note the "l1 coefficient" is actually the l0 coefficient) TODO this should be an option of activation_fn_str above!
+    jump_relu_threshold_init = 0.001  # values suggested by paper
+    jump_relu_bandwidth = 0.001 # values suggested by paper
     # Misc
     n_checkpoints: int = 10
     checkpoint_path: str = "/network/scratch/s/sonia.joseph/sae_checkpoints/tinyclip_40M_mlp_out"

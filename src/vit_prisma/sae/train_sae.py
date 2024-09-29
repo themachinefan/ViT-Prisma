@@ -63,6 +63,7 @@ class VisionSAETrainer:
         self.cfg.run_name = self.cfg.unique_hash + "-" + self.cfg.wandb_project
 
         self.checkpoint_thresholds = self.get_checkpoint_thresholds()
+        self.n_checkpoints = self.cfg.n_checkpoints
         self.setup_checkpoint_path()
 
         self.cfg.pretty_print() if self.cfg.verbose else None
@@ -102,7 +103,8 @@ class VisionSAETrainer:
             from vit_prisma.dataloaders.imagenet_dataset import ImageNetValidationDataset
             if model_type == 'clip':
                 from vit_prisma.transforms.open_clip_transforms import get_clip_val_transforms
-                data_transforms = get_clip_val_transforms(self.cfg.model_name)
+                # this was taking in self.cfg.model_name but doesn't seem to be set up for that yet!
+                data_transforms = get_clip_val_transforms()
             else:
                 raise ValueError("Invalid model type")
             imagenet_paths = setup_imagenet_paths(self.cfg.dataset_path)
@@ -301,7 +303,7 @@ class VisionSAETrainer:
         suffix = wandb_log_suffix(sparse_autoencoder.cfg, hyperparams)
         metrics = {
             f"losses/mse_loss{suffix}": mse_loss.item(),
-            f"losses/l1_loss{suffix}": l1_loss.item() / sparse_autoencoder.l1_coefficient,
+            f"losses/sparsity_loss{suffix}": l1_loss.item() / sparse_autoencoder.l1_coefficient,
             f"losses/ghost_grad_loss{suffix}": ghost_grad_loss.item(),
             f"losses/overall_loss{suffix}": loss.item(),
             f"metrics/explained_variance{suffix}": explained_variance.mean().item(),
@@ -348,7 +350,7 @@ class VisionSAETrainer:
 
         self.checkpoint_thresholds.pop(0)
         if len(self.checkpoint_thresholds) == 0:
-            n_checkpoints = 0
+            self.n_checkpoints = 0
         if self.cfg.log_to_wandb:
             hyperparams = sae.cfg
             self.save_to_wandb(sae, hyperparams, path, log_feature_sparsity_path)
@@ -423,7 +425,7 @@ class VisionSAETrainer:
             n_training_steps += 1
             n_training_tokens += self.cfg.train_batch_size
 
-            if self.cfg.n_checkpoints > 0 and n_training_tokens > self.checkpoint_thresholds[0]:
+            if self.n_checkpoints > 0 and n_training_tokens > self.checkpoint_thresholds[0]:
                 self.checkpoint(self.sae, n_training_tokens, act_freq_scores, n_frac_active_tokens)
                 print(f"Checkpoint saved at {n_training_tokens} tokens") if self.cfg.verbose else None
 
