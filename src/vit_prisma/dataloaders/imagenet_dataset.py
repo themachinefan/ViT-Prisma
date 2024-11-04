@@ -73,7 +73,7 @@ def load_imagenet(preprocess_transform, dataset_path, dataset_type='imagenet1k-v
         return val_data
 
 class ImageNetValidationDataset(torch.utils.data.Dataset):
-        def __init__(self, images_dir, imagenet_class_index, validation_labels,  transform=None, return_index=False):
+        def __init__(self, images_dir, imagenet_class_index, validation_labels,  transform=None, return_index=False, only_these_labels=None):
             self.images_dir = images_dir
             self.transform = transform
             self.labels = {}
@@ -81,7 +81,7 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
 
             # load label code to index
             self.label_to_index = {}
-    
+           # ind_to_name  = {}
             with open(imagenet_class_index, 'r') as file:
                 # Iterate over each line in the file
                 for line_num, line in enumerate(file):
@@ -89,9 +89,17 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
                     if not line:
                         continue
                     parts = line.split(' ')
+
                     code = parts[0]
                     self.label_to_index[code] = line_num
 
+                   # label = parts[1:]
+                   # label_str = ""
+                   # for l in label:
+                   #     label_str = label_str + l + (" " if "," in l else "")
+                  #  ind_to_name[line_num] = label_str
+     
+            #print(ind_to_name)
 
             # load image name to label code
             self.image_name_to_label = {}
@@ -107,10 +115,24 @@ class ImageNetValidationDataset(torch.utils.data.Dataset):
                     first_prediction = row['PredictionString'].split()[0]
                     # Map the ImageId to the first part of the PredictionString
                     self.image_name_to_label[row['ImageId']] = first_prediction
-
-
+           
 
             self.image_names = list(os.listdir(self.images_dir))
+
+
+            if only_these_labels is not None:
+                actual_names = []
+                for name in self.image_names:
+                    img_name = os.path.basename(os.path.splitext(name)[0])
+
+                    label_i = self.label_to_index[self.image_name_to_label[img_name]]
+
+                    if label_i in only_these_labels:
+                        actual_names.append(name)
+
+            
+                self.image_names = actual_names
+          
 
         def __len__(self):
             return len(self.image_names)
