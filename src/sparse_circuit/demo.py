@@ -177,7 +177,7 @@ def main():
 
     node_name = f"{output_name}_nodes.pt"
     edges_name = f"{output_name}_edges.pt"
-    features_name = f"{output_name}_features"
+    features_name = f"{output_name}_features.pt"
     dataset = get_imagenet_val_dataset(imagenet_dataset_path, only_these_labels=only_these_labels)
    # visualize_dataset = get_imagenet_val_dataset_visualize(imagenet_dataset_path, only_these_labels=only_these_labels)
     
