@@ -30,7 +30,6 @@ def jvp(
         ).to(right_vec.act.device)
 
 
-    print("COMPUTING FOR ", len(downstream_features), "features!")
     vjv_values = {}
 
     downstream_hook = downstream_sae.cfg.hook_point
@@ -95,8 +94,8 @@ def jvp(
         vjv_values[downstream_feat_idx] = vjv
     
 
-    vjv_indices = torch.stack(list(vjv_values.keys()), dim=0).T
-    vjv_values = torch.stack([v for v in vjv_values.values()], dim=0)
+    vjv_indices = torch.stack(list(vjv_values.keys()), dim=0).T.detach()
+    vjv_values = torch.stack([v for v in vjv_values.values()], dim=0).detach()
 
     return torch.sparse_coo_tensor(vjv_indices, vjv_values, size=(b, s, n_feats_p1, b, s, n_feats_p1))
 
