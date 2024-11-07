@@ -92,7 +92,7 @@ class ClipTextStuff:
         return text_embeddings
     
 #TODO clean up and expose arguments.
-def setup(device):
+def setup(device, debug=False):
     # I choose the ones that seemed like a good balance between xvar and l1 
     # that ended up being the ones with xvar ~= 80% 
     # I don't have an ironclad reason for making this choice though. 
@@ -111,6 +111,9 @@ def setup(device):
         11: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-11-hook_resid_post-l1-8e-05",
     
     }
+    if debug:
+        for i in range(2,12):
+            del resid_post_repo_ids[i]
 
 
     # I'm only looking at resid_post just to test things out. The original paper using resid_post, mlp_out and the output of the attention blocks 
@@ -149,13 +152,13 @@ def setup(device):
 def main():
     imagenet_dataset_path = r"F:/prisma_data/imagenet-object-localization-challenge"
 
-    output_fodler = r"F:\ViT-Prisma_fork\data\circuit_output"
-    output_name = "testing_stuff"
+    output_folder = r"F:\ViT-Prisma_fork\data\circuit_output"
+    output_name = "testing_stuff_2"
     num_workers = 3
     batch_size = 16
     device = "cuda"
     ig_steps = 10
-    num_examples = 50_000
+    num_examples = 250
     nodes_only = False 
     only_these_labels=[281, 282, 283, 284, 285]
     top_k = 25 #  saves all nodes but only looks for edges between the top_k of each (can be set to None)
@@ -165,21 +168,22 @@ def main():
     debug = False
     if debug:
         num_workers = 0 
-        batch_size = 32 
-        num_examples = 250
+        batch_size = 2 
+        num_examples = 10
         only_these_labels=[281, 282, 283, 284, 285]
         top_k = 3
 
 
 
-    node_name = f"{output_name}_nodes2.pt"
-    edges_name = f"{output_name}_edges2.pt"
+    node_name = f"{output_name}_nodes.pt"
+    edges_name = f"{output_name}_edges.pt"
+    features_name = f"{output_name}_features"
     dataset = get_imagenet_val_dataset(imagenet_dataset_path, only_these_labels=only_these_labels)
    # visualize_dataset = get_imagenet_val_dataset_visualize(imagenet_dataset_path, only_these_labels=only_these_labels)
     
 
 
-    model, saes, model_name = setup(device)
+    model, saes, model_name = setup(device, debug=debug)
     
     clip_text_stuff = ClipTextStuff(model_name, device)
 
@@ -218,7 +222,7 @@ def main():
         
         #return  get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
 
-        nodes, edges = get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
+        nodes, edges, features = get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
 
 
         #TODO this can be sped up by keeping it in tensor form.
@@ -264,8 +268,9 @@ def main():
             final_edges[k1][k2] = v2
 
 
-    torch.save(final_nodes, os.path.join(output_fodler, node_name))
-    torch.save(final_edges, os.path.join(output_fodler, edges_name))
+    torch.save(final_nodes, os.path.join(output_folder, node_name))
+    torch.save(final_edges, os.path.join(output_folder, edges_name))
+    torch.save(features, os.path.join(output_folder,features_name ))
     print("WOW that took", time.perf_counter() - tic, "seconds")
     #final_nodes_loaded = torch.load(save_path)
 

@@ -20,15 +20,36 @@ def jvp(
     Return a sparse shape [# downstream features + 1, # upstream features + 1] tensor of Jacobian-vector products.
     """
     
-    if not downstream_features:
-        return torch.sparse_coo_tensor(torch.zeros((2, 0), dtype=torch.long), torch.zeros(0)).to(right_vec.act.device)
+    b, s, n_feats_p1 = downstream_features.shape
+
+    if torch.all(downstream_features == 0):
+        return torch.sparse_coo_tensor(
+            torch.zeros((2 * downstream_features.dim(), 0), dtype=torch.long), 
+            torch.zeros(0), 
+            size=(b, s,n_feats_p1, b, s, n_feats_p1)
+        ).to(right_vec.act.device)
+
 
     print("COMPUTING FOR ", len(downstream_features), "features!")
-    vjv_indices = {}
     vjv_values = {}
 
     downstream_hook = downstream_sae.cfg.hook_point
     upstream_hook = upstream_sae.cfg.hook_point
+
+
+    # x = upstream_submod.get_activation()
+    # x_hat, f = upstream_dict.hacked_forward_for_sfc(x) # hacking around an nnsight bug
+    # x_res = x - x_hat
+    # upstream_submod.set_activation(x_hat + x_res)
+    # upstream_act = SparseAct(act=f, res=x_res).save()
+    
+    # y = downstream_submod.get_activation()
+    # y_hat, g = downstream_dict.hacked_forward_for_sfc(y) # hacking around an nnsight bug
+    # y_res = y - y_hat
+    # downstream_act = SparseAct(act=g, res=y_res)
+
+    # to_backprops = (left_vec @ downstream_act).to_tensor()
+
 
     upstream_act = None 
     downstream_act = None 
@@ -39,7 +60,10 @@ def jvp(
 
         upstream_sae_out, upstream_feature_acts, *_ = upstream_sae(x)
 
-        upstream_error = x - upstream_sae_out
+
+
+        upstream_error = (x - upstream_sae_out).detach()
+        upstream_error.requires_grad = True 
         upstream_act = SparseAct(act =upstream_feature_acts, res=upstream_error)
         return upstream_sae_out + upstream_error
     
@@ -57,40 +81,80 @@ def jvp(
     upstream_act.act.retain_grad()
     upstream_act.res.retain_grad()
 
-    
-    for feat in tqdm(downstream_features):
-        ### in full version need to check dictionary case
-        to_backprop = (left_vec @ downstream_act).to_tensor().flatten()
+    to_backprops = (left_vec @ downstream_act).to_tensor()
 
-        # TODO note before
-        to_backprop[feat].backward(retain_graph=True)
+    for downstream_feat_idx in downstream_features.nonzero():
+        # in full version need intermediate stop grads here but should be ok since only doing residual stream
 
-        vjv = (upstream_act.grad @ right_vec).to_tensor().flatten()
+        to_backprops[tuple(downstream_feat_idx)].backward(retain_graph=True)
 
 
-        ### in full version check jv here
-        upstream_error.grad = torch.zeros_like(upstream_error)
+        #TODO the code is meant to get gradient info from res even though it's detached but am I doing it right?
+        vjv = (upstream_act.grad @ right_vec).to_tensor()
 
-        vjv_indices[feat] = vjv.nonzero().squeeze(-1).detach()
-        vjv_values[feat] = vjv[vjv_indices[feat]].detach()
-
+        vjv_values[downstream_feat_idx] = vjv
     
 
-    # # get shapes
-    d_downstream_contracted = len((downstream_act @ downstream_act).to_tensor().flatten())
-    d_upstream_contracted = len((upstream_act @ upstream_act).to_tensor().flatten())
+    vjv_indices = torch.stack(list(vjv_values.keys()), dim=0).T
+    vjv_values = torch.stack([v for v in vjv_values.values()], dim=0)
+
+    return torch.sparse_coo_tensor(vjv_indices, vjv_values, size=(b, s, n_feats_p1, b, s, n_feats_p1))
 
 
-    vjv_indices = torch.tensor(
-        [[downstream_feat for downstream_feat in downstream_features for _ in vjv_indices[downstream_feat]],
-        torch.cat([vjv_indices[downstream_feat] for downstream_feat in downstream_features], dim=0)]
-    ).to(right_vec.act.device)
-    vjv_values = torch.cat([vjv_values[downstream_feat] for downstream_feat in downstream_features], dim=0)
+
+# def jvpold(
+#     input,
+#     model,
+#     dictionaries,
+#     downstream_submod,
+#     downstream_features,
+#     upstream_submod,
+#     left_vec: SparseAct,
+#     right_vec: SparseAct,
+# ):
+
+#     downstream_dict, upstream_dict = dictionaries[downstream_submod], dictionaries[upstream_submod]
+#     b, s, n_feats = downstream_features.act.shape
+
+#     # if t.all(downstream_features.to_tensor() == 0):
+#     #     return t.sparse_coo_tensor(
+#     #         t.zeros((2 * downstream_features.act.dim(), 0), dtype=t.long), 
+#     #         t.zeros(0), 
+#     #         size=(b, s, n_feats+1, b, s, n_feats+1)
+#     #     ).to(model.device)
 
 
-    return torch.sparse_coo_tensor(vjv_indices, vjv_values, (d_downstream_contracted, d_upstream_contracted))
+#     vjv_values = {}
+
+#     x = upstream_submod.get_activation()
+#     x_hat, f = upstream_dict.hacked_forward_for_sfc(x) # hacking around an nnsight bug
+#     x_res = x - x_hat
+#     upstream_submod.set_activation(x_hat + x_res)
+#     upstream_act = SparseAct(act=f, res=x_res).save()
+    
+#     y = downstream_submod.get_activation()
+#     y_hat, g = downstream_dict.hacked_forward_for_sfc(y) # hacking around an nnsight bug
+#     y_res = y - y_hat
+#     downstream_act = SparseAct(act=g, res=y_res)
+
+#     to_backprops = (left_vec @ downstream_act).to_tensor()
+
+#     for downstream_feat_idx in downstream_features.to_tensor().nonzero():
+#         # stop grad
+#         # for submodule in intermediate_stopgrads:
+#         #     submodule.stop_grad()
+#         x_res.grad = torch.zeros_like(x_res.grad)
+
+#         vjv = (upstream_act.grad @ right_vec).to_tensor()
+#         to_backprops[tuple(downstream_feat_idx)].backward(retain_graph=True)
+
+#         vjv_values[downstream_feat_idx] = vjv.save() # type: ignore
 
 
+#     vjv_indices = torch.stack(list(vjv_values.keys()), dim=0).T
+#     vjv_values = torch.stack([v.value for v in vjv_values.values()], dim=0)
+
+#     return torch.sparse_coo_tensor(vjv_indices, vjv_values, size=(b, s, n_feats+1, b, s, n_feats+1))
 
 ###### utilities for dealing with sparse COO tensors ######
 def flatten_index(idxs, shape):
@@ -300,27 +364,30 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
     features = {} 
 
     for hook_point, effect in effects.items():
-        tensor_effect = effect.to_tensor().flatten()
 
-        indices = torch.arange(len(tensor_effect), device=tensor_effect.device)
-        mask = torch.ones(len(tensor_effect), dtype=torch.bool, device=tensor_effect.device)
+        tensor_effect = effect.to_tensor()
+
+        abs_effects = tensor_effect.abs()
         
-        # Apply absolute threshold mask
+        # Initialize the mask as a tensor of True values
+        mask = torch.ones_like(abs_effects, dtype=torch.bool)
+        
+        # Apply the top-k threshold if top_k is not None
+        if node_max_per_hook is not None and node_max_per_hook <= abs_effects.numel():
+            top_k_values, _ = torch.topk(abs_effects.flatten(), node_max_per_hook)
+            top_k_threshold = top_k_values[-1]  # Smallest value in the top-k
+            mask &= abs_effects >= top_k_threshold  # Update mask with top-k condition
+        
+        # Apply the node threshold if node_threshold is not None
         if node_abs_threshold is not None:
-            mask_abs = torch.abs(tensor_effect) >= node_abs_threshold
-            mask = mask & mask_abs  # Combine masks
+            mask &= abs_effects > node_abs_threshold  # Update mask with node_threshold condition
+        
+        # Store the final mask in the dictionary
+        features[hook_point] = mask
 
-        # Apply the combined mask to indices
-        indices = indices[mask]
-        # Select top-k values
-        if node_max_per_hook is not None and len(indices) > 0:
-            tensor_subset = tensor_effect[indices]
-            abs_values = torch.abs(tensor_subset)
-            sorted_indices = torch.argsort(abs_values, descending=True)
-            top_k = min(node_max_per_hook, len(sorted_indices))
-            indices = indices[sorted_indices[:top_k]]
+        print("new featres", mask.shape, len(mask.nonzero()))
 
-        features[hook_point] = indices.tolist()
+
       #  features[hook_point] =
  #   features_by_submod = {
  #       submod : (effects[submod].to_tensor().flatten().abs() > node_threshold).nonzero().flatten().tolist() for submod in all_submods
@@ -339,16 +406,6 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
         prev_resid_hook_point = f"blocks.{layer-1}.hook_resid_post"
 
 
-        # return (
-        #     clean_inputs,
-        #     model,
-        #     saes[resid_hook_point],
-        #     features[resid_hook_point],
-        #     saes[prev_resid_hook_point],
-        #     grads[resid_hook_point],
-        #     deltas[prev_resid_hook_point],
-            
-        # )
         RR_edge = jvp(
             clean_inputs,
             model,
@@ -359,11 +416,76 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
             deltas[prev_resid_hook_point],
             
         )
-        print(type(RR_edge))
 
         edges[prev_resid_hook_point][resid_hook_point] = RR_edge
 
     nodes = effects
+#     for child in edges:
+#         # get shape for child
+#         bc, sc, fc = nodes[child].act.shape
+#         for parent in edges[child]:
+#             weight_matrix = edges[child][parent]
+#             if parent == 'y':
+#                 weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+#             else:
+#                 bp, sp, fp = nodes[parent].act.shape
+#                 assert bp == bc
+#                 weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+#             edges[child][parent] = weight_matrix
+
+
+#     if aggregation == 'sum':
+# #         # aggregate across sequence position
+#         for child in edges:
+#             for parent in edges[child]:
+#                 weight_matrix = edges[child][parent]
+#                 if parent == 'y':
+#                     weight_matrix = weight_matrix.sum(dim=1)
+#                 else:
+#                     weight_matrix = weight_matrix.sum(dim=(1, 4))
+#                 edges[child][parent] = weight_matrix
+#         for node in nodes:
+#             if node != 'y':
+#                 nodes[node] = nodes[node].sum(dim=1)
+
+#         # aggregate across batch dimension
+#         for child in edges:
+#             bc, fc = nodes[child].act.shape
+#             for parent in edges[child]:
+#                 weight_matrix = edges[child][parent]
+#                 if parent == 'y':
+#                     weight_matrix = weight_matrix.sum(dim=0) / bc
+#                 else:
+#                     bp, fp = nodes[parent].act.shape
+#                     assert bp == bc
+#                     weight_matrix = weight_matrix.sum(dim=(0,2)) / bc
+#                 edges[child][parent] = weight_matrix
+#         for node in nodes:
+#             if node != 'y':
+#                 nodes[node] = nodes[node].mean(dim=0)
+    
+#     elif aggregation == 'none':
+
+#         # aggregate across batch dimensions
+#         for child in edges:
+#             # get shape for child
+#             bc, sc, fc = nodes[child].act.shape
+#             for parent in edges[child]:
+#                 weight_matrix = edges[child][parent]
+#                 if parent == 'y':
+#                     weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
+#                     weight_matrix = weight_matrix.sum(dim=0) / bc
+#                 else:
+#                     bp, sp, fp = nodes[parent].act.shape
+#                     assert bp == bc
+#                     weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+#                     weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
+#                 edges[child][parent] = weight_matrix
+#         for node in nodes:
+#             nodes[node] = nodes[node].mean(dim=0)
+
+#     else:
+#         raise ValueError(f"Unknown aggregation: {aggregation}")
     for child in edges:
         # get shape for child
         bc, sc, fc = nodes[child].act.shape
@@ -372,14 +494,17 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
             if parent == 'y':
                 weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
             else:
-                bp, sp, fp = nodes[parent].act.shape
-                assert bp == bc
-                weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+                continue
+                # bp, sp, fp = nodes[parent].act.shape
+                # assert bp == bc
+                # try:
+                #     weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+                # except:
+                #     breakpoint()
             edges[child][parent] = weight_matrix
-
-
+    
     if aggregation == 'sum':
-#         # aggregate across sequence position
+        # aggregate across sequence position
         for child in edges:
             for parent in edges[child]:
                 weight_matrix = edges[child][parent]
@@ -422,7 +547,7 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
                 else:
                     bp, sp, fp = nodes[parent].act.shape
                     assert bp == bc
-                    weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
+                    # weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
                     weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
                 edges[child][parent] = weight_matrix
         for node in nodes:
@@ -431,4 +556,4 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
     else:
         raise ValueError(f"Unknown aggregation: {aggregation}")
 
-    return nodes, edges 
+    return nodes, edges, features
