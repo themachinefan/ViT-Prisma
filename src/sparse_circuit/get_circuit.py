@@ -373,8 +373,12 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
         
         # Apply the top-k threshold if top_k is not None
         if node_max_per_hook is not None and node_max_per_hook <= abs_effects.numel():
+            #TODO fix so no repetition 
             top_k_values, _ = torch.topk(abs_effects.flatten(), node_max_per_hook)
             top_k_threshold = top_k_values[-1]  # Smallest value in the top-k
+
+
+
             mask &= abs_effects >= top_k_threshold  # Update mask with top-k condition
         
         # Apply the node threshold if node_threshold is not None
@@ -555,4 +559,4 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
     else:
         raise ValueError(f"Unknown aggregation: {aggregation}")
 
-    return nodes, edges, features
+    return nodes, edges

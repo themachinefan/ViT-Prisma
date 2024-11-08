@@ -222,7 +222,7 @@ def main():
         
         #return  get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
 
-        nodes, edges, features = get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
+        nodes, edges = get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
 
 
         #TODO this can be sped up by keeping it in tensor form.
@@ -270,7 +270,7 @@ def main():
 
     torch.save(final_nodes, os.path.join(output_folder, node_name))
     torch.save(final_edges, os.path.join(output_folder, edges_name))
-    torch.save(features, os.path.join(output_folder,features_name ))
+   # torch.save(features, os.path.join(output_folder,features_name ))
     print("WOW that took", time.perf_counter() - tic, "seconds")
     #final_nodes_loaded = torch.load(save_path)
 
