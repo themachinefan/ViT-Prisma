@@ -15,7 +15,7 @@ from huggingface_hub import hf_hub_download
 from vit_prisma.utils.load_model import load_model
 import open_clip
 from sparse_circuit.get_circuit import get_circuit
-
+import time 
 
 
 #NOTE THIS IS THE NO PAIR VERSION. 
@@ -91,12 +91,11 @@ class ClipTextStuff:
         text_embeddings = text_embeddings.to(self.device)
         return text_embeddings
     
-#TODO clean up and expose arguments.
-def setup(device, debug=False):
-    # I choose the ones that seemed like a good balance between xvar and l1 
-    # that ended up being the ones with xvar ~= 80% 
-    # I don't have an ironclad reason for making this choice though. 
-    resid_post_repo_ids = {
+def setup_saes_and_model(device,
+              # I choose the ones that seemed like a good balance between xvar and l1 
+              # that ended up being the ones with xvar ~= 80% 
+              # I don't have an ironclad reason for making this choice though. 
+              resid_post_repo_ids = {
         0: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-0-hook_resid_post-l1-0.0001",
         1: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-1-hook_resid_post-l1-0.0001",
         2: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-2-hook_resid_post-l1-0.0001",
@@ -109,11 +108,17 @@ def setup(device, debug=False):
         9: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-9-hook_resid_post-l1-8e-05",
         10: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-10-hook_resid_post-l1-8e-05",
         11: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-11-hook_resid_post-l1-8e-05",
-    
-    }
+    },
+           debug=False,
+           only_these_layers=None):
+
     if debug:
         for i in range(2,12):
             del resid_post_repo_ids[i]
+    elif only_these_layers is not None:
+        for i in range(0,12):
+            if i not in only_these_layers:
+                del resid_post_repo_ids[i]
 
 
     # I'm only looking at resid_post just to test things out. The original paper using resid_post, mlp_out and the output of the attention blocks 
@@ -130,6 +135,8 @@ def setup(device, debug=False):
         assert sae.cfg.architecture == "standard", "Haven't checked what changes are needed for gated if any"
 
         saes[f"blocks.{layer}.hook_resid_post"] = sae
+
+
         if model_name is None:
             model_name = sae.cfg.model_name 
             model_class_name = sae.cfg.model_class_name
@@ -140,16 +147,14 @@ def setup(device, debug=False):
     model = load_model(model_class_name, model_name)
     model = model.to(device)
 
-
-  
-
-
-
-
     return  model, saes, model_name
 
 
 def main():
+
+    ### SETUP #########################################
+
+    # args
     imagenet_dataset_path = r"F:/prisma_data/imagenet-object-localization-challenge"
 
     output_folder = r"F:\ViT-Prisma_fork\data\circuit_output"
@@ -160,57 +165,59 @@ def main():
     ig_steps = 10
     num_examples = 250
     nodes_only = False 
-    only_these_labels=[281, 282, 283, 284, 285]
-    top_k = 25 #  saves all nodes but only looks for edges between the top_k of each (can be set to None)
-    node_threshold = None #  saves all nodes but only looks for edges between those above this threshold (can be set to None)
-
+    only_these_labels=[281, 282, 283, 284, 285] # only use these classes from imagenet1k
+    top_k = 10 # save at most top_k nodes per layer
+    node_threshold_std = 3 # keep nodes x std deviations from mean 
+    only_these_layers = [7,8,9,10,11] #earlier layers don't seems as easy to interpret so for simplicity using layer layers only
+    tokens_per_node = 2 # how many tokens to use per node during edge computation 
 
     debug = False
     if debug:
         num_workers = 0 
         batch_size = 2 
-        num_examples = 10
-        only_these_labels=[281, 282, 283, 284, 285]
+        num_examples = 5
         top_k = 3
 
 
 
-    node_name = f"{output_name}_nodes.pt"
-    edges_name = f"{output_name}_edges.pt"
-    features_name = f"{output_name}_features.pt"
-    dataset = get_imagenet_val_dataset(imagenet_dataset_path, only_these_labels=only_these_labels)
-   # visualize_dataset = get_imagenet_val_dataset_visualize(imagenet_dataset_path, only_these_labels=only_these_labels)
+    # get the model and the saes
+    model, saes, model_name = setup_saes_and_model(device, debug=debug, only_these_layers=only_these_layers)
     
-
-
-    model, saes, model_name = setup(device, debug=debug)
-    
+    # get the text embeddings for tinyclip
     clip_text_stuff = ClipTextStuff(model_name, device)
-
-
-
-
-
    
-    #TODO use data for a specific concept in mind. 
-
+    # get the dataloader
+    dataset = get_imagenet_val_dataset(imagenet_dataset_path, only_these_labels=only_these_labels)
     dataloader =  DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
-    num_examples = min(num_examples, batch_size*(len(dataset)//batch_size))
+    
 
+    ##### SETUP END #########################################################
+    
+    num_examples = min(num_examples, batch_size*(len(dataset)//batch_size))
+    node_name = f"{output_name}_nodes.pt"
+    parsed_node_name = f"{output_name}_nodes_parsed.pt"
+    edges_name = f"{output_name}_edges.pt"
+    
 
     cat = clip_text_stuff.get_text_embeds(["cat"])[0] # d_embed
     #TODO should I use the logit scale for this? clip_text_stuff.logit_scale.exp()
 
 
+
+
+    # NOTE It's slower but seems best to first get values for all nodes, then choose which ones to keep and finally find edges for those nodes
+
+    ### FIRST GET THE NODES 
+    print("FINDING NODES")
     batch_i = 0
     running_nodes = None 
-    running_edges = None
-    import time 
     tic = time.perf_counter()
     for batch in tqdm(dataloader):
         if batch_i*batch_size >= num_examples:
             break 
         batch_i += 1
+
+        # metric used!
         #defined here since in some cases the metric changes each batch (if the answer changes)
         def metric_fn(model_output):
             scores = einsum( "I D, D -> I", model_output, cat)
@@ -219,45 +226,105 @@ def main():
         images = batch[0]
 
         images = images.to(device)
-        
-        #return  get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
-
-        nodes, edges = get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=nodes_only, node_abs_threshold=node_threshold, node_max_per_hook=top_k)
+     
+        nodes, _ = get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=True)
 
 
-        #TODO this can be sped up by keeping it in tensor form.
-
+    
         # add up all the nodes! (also undo the mean from get_circuit_nodes, turning it in to a sum, could just not do it in the first place but this is consistent with the code and might make more sense when the edge part is done)
         if running_nodes is None:
             running_nodes = {k : batch_size * nodes[k] for k in nodes.keys() if k != 'y'}
-            if edges is not None:
-                running_edges = { k : { kk : batch_size * edges[k][kk] for kk in edges[k].keys() } for k in edges.keys()}
-
         else:
             for k in nodes.keys():
                 if k != 'y':
                     running_nodes[k] += batch_size * nodes[k]
-            if edges is not None:
-                for k in edges.keys():
+
+        del nodes 
+
+    # take a global average! 
+    nodes = {k : v / num_examples for k, v in running_nodes.items()}
+
+
+    final_nodes = {}
+    for k,v in nodes.items():
+        final_nodes[k] =  torch.cat((v.act, v.resc), dim=0)
+
+    torch.save(final_nodes, os.path.join(output_folder, node_name))
+
+    # parse the 'best' nodes to use to compute edges
+    custom_node_indices = {}
+    custom_node_values = {}
+    for hook_point, results in final_nodes.items():
+
+        results_abs = results.abs()
+        mean = torch.mean(results)
+        std = torch.std(results)
+
+
+        # Find indices where A > mean + num_std * std
+        if node_threshold_std is not None:
+            indices = torch.nonzero(results > mean + node_threshold_std * std).squeeze()
+            values_abs = results[indices]
+            values = results[indices]
+        else:
+            values_abs = results_abs
+            values = results
+        if top_k is not None:
+            if len(values_abs)> top_k:
+                og_amount = len(values_abs)   
+                values_abs, top_k_indices = torch.topk(values_abs, top_k, largest=True)
+                indices = indices[top_k_indices]
+                print("removed", og_amount-top_k, 'nodes from', hook_point)
+
+        values_abs, sorted_indices = torch.sort(values_abs, descending=True)
+        
+        custom_node_indices[hook_point] = indices[sorted_indices].tolist()
+        custom_node_values[hook_point] = values[sorted_indices].tolist()
+    torch.save((custom_node_indices, custom_node_values), os.path.join(output_folder, parsed_node_name))
+
+    del final_nodes
+    del custom_node_values 
+
+    if nodes_only:
+        return 
+
+
+    # Run again and find the edges for the nodes choosen above 
+    print("FINDING EDGES")
+    running_edges = None
+    batch_i = 0
+
+
+    for batch in tqdm(dataloader):
+        if batch_i*batch_size >= num_examples:
+            break 
+        batch_i += 1
+
+        # metric used!
+        #defined here since in some cases the metric changes each batch (if the answer changes)
+        def metric_fn(model_output):
+            scores = einsum( "I D, D -> I", model_output, cat)
+            return scores 
+        
+        images = batch[0]
+
+        images = images.to(device)
+     
+        _, edges = get_circuit(images, None, model, saes, metric_fn, ig_steps=ig_steps, nodes_only=False,use_these_nodes=custom_node_indices, tokens_per_predetermined_node=tokens_per_node)
+
+        # add up all the edges
+        if running_edges is None:
+            running_edges = { k : { kk : batch_size * edges[k][kk] for kk in edges[k].keys() } for k in edges.keys()}
+
+        else:
+            for k in edges.keys():
                     for v in edges[k].keys():
                         running_edges[k][v] += batch_size * edges[k][v]
 
-        del nodes 
         del edges 
-    # take a global average! 
-    nodes = {k : v / num_examples for k, v in running_nodes.items()}
-    if running_edges is not None:
+
         edges = {k : {kk : 1/num_examples * v for kk, v in running_edges[k].items()} for k in running_edges.keys()}
-    final_nodes = {}
 
-
-    #NOTE I'm saving ALL nodes because how to threshold is not totally clear and I want to experiment 
-    for k,v in nodes.items():
-
-    
-        print(v.act.shape, v.resc.shape)
-
-        final_nodes[k] =  torch.cat((v.act, v.resc), dim=0)
 
     final_edges = {}
 
@@ -268,11 +335,9 @@ def main():
             final_edges[k1][k2] = v2
 
 
-    torch.save(final_nodes, os.path.join(output_folder, node_name))
     torch.save(final_edges, os.path.join(output_folder, edges_name))
-   # torch.save(features, os.path.join(output_folder,features_name ))
+
     print("WOW that took", time.perf_counter() - tic, "seconds")
-    #final_nodes_loaded = torch.load(save_path)
 
 if __name__ == "__main__":
     main()
