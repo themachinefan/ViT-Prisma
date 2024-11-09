@@ -322,7 +322,6 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
                 indices3 = indices3.long().to(mask.device)
 
                 # Update the mask tensor
-                print(indices1, indices2, indices3)
                 mask[indices1, indices2, indices3] = True
 
 

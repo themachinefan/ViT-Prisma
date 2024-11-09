@@ -160,7 +160,7 @@ def main():
     output_folder = r"F:\ViT-Prisma_fork\data\circuit_output"
     output_name = "testing_stuff_2"
     num_workers = 3
-    batch_size = 16
+    batch_size = 8 #NOTE not actually that important if anything, smaller is better aside from speed
     device = "cuda"
     ig_steps = 10
     num_examples = 250
@@ -169,7 +169,7 @@ def main():
     top_k = 10 # save at most top_k nodes per layer
     node_threshold_std = 3 # keep nodes x std deviations from mean 
     only_these_layers = [7,8,9,10,11] #earlier layers don't seems as easy to interpret so for simplicity using layer layers only
-    tokens_per_node = 2 # how many tokens to use per node during edge computation 
+    tokens_per_node = 2 #NOTE make this as big as you can. how many tokens to use per node during edge computation 
 
     debug = False
     if debug:
@@ -264,7 +264,7 @@ def main():
         # Find indices where A > mean + num_std * std
         if node_threshold_std is not None:
             indices = torch.nonzero(results > mean + node_threshold_std * std).squeeze()
-            values_abs = results[indices]
+            values_abs = results_abs[indices]            
             values = results[indices]
         else:
             values_abs = results_abs
@@ -274,12 +274,15 @@ def main():
                 og_amount = len(values_abs)   
                 values_abs, top_k_indices = torch.topk(values_abs, top_k, largest=True)
                 indices = indices[top_k_indices]
+                values = values[top_k_indices]        
+
                 print("removed", og_amount-top_k, 'nodes from', hook_point)
 
         values_abs, sorted_indices = torch.sort(values_abs, descending=True)
         
         custom_node_indices[hook_point] = indices[sorted_indices].tolist()
         custom_node_values[hook_point] = values[sorted_indices].tolist()
+    print("YO", custom_node_values)
     torch.save((custom_node_indices, custom_node_values), os.path.join(output_folder, parsed_node_name))
 
     del final_nodes
