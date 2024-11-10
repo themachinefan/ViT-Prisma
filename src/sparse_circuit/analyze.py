@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 import heapq
 
 from sparse_circuit.demo import setup_saes_and_model, get_imagenet_val_dataset, get_imagenet_val_dataset_visualize
+from vit_prisma.sae.sae import SparseAutoencoder
 def find_threshold_for_top_k(A, k):
     # Find the kth largest value, which is the threshold for the top k elements
     if k > len(A):
@@ -28,85 +29,92 @@ def find_threshold_for_top_k(A, k):
 def compute_feature_activations(
     images: torch.Tensor,
     model: torch.nn.Module,
-    sparse_autoencoder: torch.nn.Module,
-    encoder_weights: torch.Tensor,
-    encoder_biases: torch.Tensor,
+    sparse_autoencoders: torch.nn.Module,
     feature_ids: List[int],
     is_cls_list: List[bool],
     top_k: int = 10
-) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+) -> Dict[str,Dict[int, Tuple[torch.Tensor, torch.Tensor]]]:
     """
     Compute the highest activating tokens for given features in a batch of images.
     
     Args:
         images: Input images
         model: The main model
-        sparse_autoencoder: The sparse autoencoder
-        encoder_weights: Encoder weights for selected features
-        encoder_biases: Encoder biases for selected features
-        feature_ids: List of feature IDs to analyze
-        feature_categories: Categories of the features
+        sparse_autoencoders: The sparse autoencoders (dictionary: hook_point -> sparse autoencoder)
+        feature_ids: Indices of features (dictionary: hook_point -> features)
+        is_cls_list: tells which indices are cls or not (dictionary: hook_point -> list of bool)
         top_k: Number of top activations to return per feature
 
     Returns:
-        Dictionary mapping feature IDs to tuples of (top_indices, top_values)
+        Dictionary of dictionary mapping hookpoint to feature IDs to tuples of (top_indices, top_values)
     """
-    _, cache = model.run_with_cache(images, names_filter=[sparse_autoencoder.cfg.hook_point])
-    
-    layer_activations = cache[sparse_autoencoder.cfg.hook_point]
-    batch_size, seq_len, _ = layer_activations.shape
-    flattened_activations = einops.rearrange(layer_activations, "batch seq d_mlp -> (batch seq) d_mlp")
-    
-    sae_input = flattened_activations - sparse_autoencoder.b_dec
-    feature_activations = einops.einsum(sae_input, encoder_weights, "... d_in, d_in n -> ... n") + encoder_biases
-    feature_activations = torch.nn.functional.relu(feature_activations)
-    
-    reshaped_activations = einops.rearrange(feature_activations, "(batch seq) d_in -> batch seq d_in", batch=batch_size, seq=seq_len)
-    cls_token_activations = reshaped_activations[:, 0, :]
-    mean_image_activations = reshaped_activations.mean(1)
 
+    _, cache = model.run_with_cache(images, names_filter=list(sparse_autoencoders.keys()))
     top_activations = {}
-    for i, (feature_id, is_cls) in enumerate(zip(feature_ids, is_cls_list)):
-        if is_cls:
-            top_values, top_indices = cls_token_activations[:, i].topk(top_k)
-        else:
-            top_values, top_indices = mean_image_activations[:, i].topk(top_k)
-        top_activations[feature_id] = (top_indices, top_values)
-    
+    for hook_point in sparse_autoencoders.keys():
+        top_activations[hook_point] = {}
+
+        cur_feature_ids = feature_ids[hook_point]
+        if len(cur_feature_ids) == 0:
+            top_activations[hook_point][feature_id] = (None, None)
+            continue 
+        sparse_autoencoder = sparse_autoencoders[hook_point]
+
+        cur_is_cls_list = is_cls_list[hook_point]
+        encoder_biases = sparse_autoencoder.b_enc[cur_feature_ids]
+        encoder_weights = sparse_autoencoder.W_enc[:, cur_feature_ids]
+
+        layer_activations = cache[hook_point]
+        batch_size, seq_len, _ = layer_activations.shape
+        flattened_activations = einops.rearrange(layer_activations, "batch seq d_mlp -> (batch seq) d_mlp")
+        
+        sae_input = flattened_activations - sparse_autoencoder.b_dec
+        feature_activations = einops.einsum(sae_input, encoder_weights, "... d_in, d_in n -> ... n") + encoder_biases
+        feature_activations = torch.nn.functional.relu(feature_activations)
+        
+        reshaped_activations = einops.rearrange(feature_activations, "(batch seq) d_in -> batch seq d_in", batch=batch_size, seq=seq_len)
+        cls_token_activations = reshaped_activations[:, 0, :]
+        mean_image_activations = reshaped_activations.mean(1)
+
+        for i, (feature_id, is_cls) in enumerate(zip(cur_feature_ids, cur_is_cls_list)):
+            if is_cls:
+                top_values, top_indices = cls_token_activations[:, i].topk(top_k)
+            else:
+                top_values, top_indices = mean_image_activations[:, i].topk(top_k)
+            top_activations[hook_point][feature_id] = (top_indices, top_values)
+        
     return top_activations
 
 def find_top_activations(
     val_dataloader: torch.utils.data.DataLoader,
     model: torch.nn.Module,
-    sparse_autoencoder: torch.nn.Module,
-    interesting_features_indices: List[int],
-    is_cls_list: List[bool],
+    sparse_autoencoders: Dict[str, SparseAutoencoder],
+    interesting_features_indices: Dict[str, List[int]],
+    is_cls_list:  Dict[str,List[bool]],
     top_k: int = 16,
     max_samples= 50_000,
     batch_size = 54, 
-) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+) -> Dict[str,Dict[int, Tuple[torch.Tensor, torch.Tensor]]]:
     """
     Find the top activations for interesting features across the validation dataset.
 
     Args:
         val_dataloader: Validation data loader
         model: The main model
-        sparse_autoencoder: The sparse autoencoder
-        interesting_features_indices: Indices of interesting features
-        interesting_features_category: Categories of interesting features
+        sparse_autoencoders: The sparse autoencoders (dictionary: hook_point -> sparse autoencoder)
+        interesting_features_indices: Indices of interesting features (dictionary: hook_point -> features)
+        is_cls_list: tells which indices are cls or not (dictionary: hook_point -> list of bool)
 
     Returns:
-        Dictionary mapping feature IDs to tuples of (top_values, top_indices)
+        Dictionary of dictionary mapping hookpoints to feature IDs to tuples of (top_values, top_indices)
     """
     device = next(model.parameters()).device
-    top_activations = {i: (None, None) for i in interesting_features_indices}
+    top_activations= {}
+    for hp, inds in interesting_features_indices.items():
+        top_activations[hp] = {i: (None, None) for i in inds}
 
-    print(sparse_autoencoder.b_enc.shape, sparse_autoencoder.W_enc.shape)
-    print(interesting_features_indices)
    # print(sparse_autoencoder.b)
     #sparse_autoencoder.b_enc =  sparse_autoencoder.b_enc.to('cpu')
-    encoder_biases = sparse_autoencoder.b_enc[interesting_features_indices]
-    encoder_weights = sparse_autoencoder.W_enc[:, interesting_features_indices]
 
     processed_samples = 0
     for batch_images, _, batch_indices in tqdm(val_dataloader, total=max_samples // batch_size):
@@ -115,51 +123,37 @@ def find_top_activations(
         batch_size = batch_images.shape[0]
 
         batch_activations = compute_feature_activations(
-            batch_images, model, sparse_autoencoder, encoder_weights, encoder_biases,
+            batch_images, model, sparse_autoencoders,
             interesting_features_indices, is_cls_list, top_k
         )
 
-        for feature_id in interesting_features_indices:
-            new_indices, new_values = batch_activations[feature_id]
-            new_indices = batch_indices[new_indices]
-            
-            if top_activations[feature_id][0] is None:
-                top_activations[feature_id] = (new_values, new_indices)
-            else:
-                combined_values = torch.cat((top_activations[feature_id][0], new_values))
-                combined_indices = torch.cat((top_activations[feature_id][1], new_indices))
-                _, top_k_indices = torch.topk(combined_values, top_k)
-                top_activations[feature_id] = (combined_values[top_k_indices], combined_indices[top_k_indices])
+        for hp in interesting_features_indices.keys():
+            for feature_id in interesting_features_indices[hp]:
+                new_indices, new_values = batch_activations[hp][feature_id]
+
+                new_indices = batch_indices[new_indices]
+                
+                if top_activations[hp][feature_id][0] is None:
+                    top_activations[hp][feature_id] = (new_values, new_indices)
+                else:
+                    combined_values = torch.cat((top_activations[hp][feature_id][0], new_values))
+                    combined_indices = torch.cat((top_activations[hp][feature_id][1], new_indices))
+                    _, top_k_indices = torch.topk(combined_values, top_k)
+                    top_activations[hp][feature_id] = (combined_values[top_k_indices], combined_indices[top_k_indices])
 
         processed_samples += batch_size
         if processed_samples >= max_samples:
             break
 
-    return {i: (values.detach().cpu(), indices.detach().cpu()) 
-            for i, (values, indices) in top_activations.items()}
+    return {
+            outer_key: {
+                inner_key: (values.detach().cpu(), indices.detach().cpu())
+                for inner_key, (values, indices) in inner_dict.items()
+            }
+            for outer_key, inner_dict in top_activations.items()
+        }
 
-torch.no_grad()
-def get_heatmap(
-          image,
-          model,
-          sparse_autoencoder,
-          feature_id,
-          device,
-): 
-    image = image.to(device)
-    _, cache = model.run_with_cache(image.unsqueeze(0), names_filter=[sparse_autoencoder.cfg.hook_point])
 
-    post_reshaped = einops.rearrange(sparse_autoencoder.run_time_activation_norm_fn_in(cache[sparse_autoencoder.cfg.hook_point]), "batch seq d_mlp -> (batch seq) d_mlp")
-    # Compute activations (not from a fwd pass, but explicitly, by taking only the feature we want)
-    # This code is copied from the first part of the 'forward' method of the AutoEncoder class
-    sae_in =  post_reshaped - sparse_autoencoder.b_dec # Remove decoder bias as per Anthropic
-
-    acts = einops.einsum(
-            sae_in,
-            sparse_autoencoder.W_enc[:, feature_id],
-            "x d_in, d_in -> x",
-        )
-    return acts 
 @torch.no_grad()
 def get_heatmap_batch(
           images,
@@ -202,9 +196,9 @@ def image_patch_heatmap(activation_values,image_size=224, pixel_num=14):
 
     # Removing axes
 #TODO clean this up and do a batch version!
-def visualize_top_activating_images(save_folder, root_name, model, sae, top_activations_per_feature,feature_ids, attrib_values, dataset, dataset_visualize, device, patch_size=32, output_image_format="jpg"):
+def visualize_top_activating_images(save_folder, root_name, model, sae, top_activations_per_feature,feature_ids, dataset, dataset_visualize, device, patch_size=32, output_image_format="jpg"):
     importance = 0
-    for feature_id, attrib_value in tqdm(zip(feature_ids, attrib_values)):
+    for feature_id in tqdm(feature_ids):
         importance += 1
         max_vals, max_inds = top_activations_per_feature[feature_id]
         images = []
@@ -262,30 +256,33 @@ if __name__ == "__main__":
 
     ### SETUP #########################################
     # load the output from demo.py 
-    parsed_nodes_path =  r"F:\ViT-Prisma_fork\data\circuit_output\testing_stuff_2_nodes_parsed.pt"
-    edges_path = r"F:\ViT-Prisma_fork\data\circuit_output\testing_stuff_2_edges.pt"
+    input_name = "testing_stuff_3_saes"
+    parsed_nodes_path =  fr"F:\ViT-Prisma_fork\data\circuit_output\{input_name}_nodes_parsed.pt"
+    edges_path = fr"F:\ViT-Prisma_fork\data\circuit_output\{input_name}_edges.pt"
+    output_folder = fr"F:\ViT-Prisma_fork\data\circuit_output\{input_name}_output"
+
     nodes_indices_loaded, nodes_values_loaded = torch.load(parsed_nodes_path)
     edges_loaded= torch.load(edges_path)
 
     print(nodes_indices_loaded, nodes_values_loaded)
     # load the imagenet dataset to be used for getting maxmimal activating images for each feature 
     imagenet_dataset_path = r"F:/prisma_data/imagenet-object-localization-challenge"
-    output_folder = r"F:\ViT-Prisma_fork\data\circuit_output\testing_stuff_output"
 
     device = "cuda"
     output_image_format = "jpg"
     batch_size = 32
-    do_generate_images = False # set to false if already done
+    do_generate_images = True # set to false if already done
     auto_open_browse_on_completion = True
     top_k_edges = 50 # only keep this many edges in total. (can be none)
-    edge_threshold = None # only keep edges above this threshold (can be none)
+    edge_threshold = 1e-4 #None # only keep edges above this threshold (can be none)
+    use_neurons = True # was the circuit computed with neurons? 
 
     #autofind what layers were used (assuming only using the residual stream like the rest of the code)
     only_these_layers = []
     for hook_point in nodes_values_loaded.keys():
         only_these_layers.append(int(hook_point.split('.')[1]))
 
-    model, saes, model_name = setup_saes_and_model(device, debug=False, only_these_layers=only_these_layers)
+    model, saes, model_name = setup_saes_and_model(device, debug=False, only_these_layers=only_these_layers, use_neurons=use_neurons)
 
 
     dataset = get_imagenet_val_dataset(imagenet_dataset_path)
@@ -307,38 +304,44 @@ if __name__ == "__main__":
 
 
     if do_generate_images:
+        
         # The first step is to get highly activating images for each node as a crude way of autointerpreting
-        ### Get images for each feature
+        ### Get indices of the images for each feature
+
+        # remove the error term it needs to be handled separately 
+        pruned_feature_ids = {}
+        pruned_feature_vals = {}
+        error_features = {}
+        error_vals = {}
+        for hook_point in nodes_indices_loaded.keys():
+            max_feature = saes[hook_point].d_sae 
+            pruned_feature_ids[hook_point] = []
+            pruned_feature_vals[hook_point] = []
+            error_features[hook_point] = []
+            error_vals[hook_point] = []
+             # the max_feature represents sae error, so it has no associated autointerp, so we represent it with black image 
+            for i, v in zip(nodes_indices_loaded[hook_point], nodes_values_loaded[hook_point]):
+                if i != max_feature:
+                    pruned_feature_ids[hook_point].append(i)
+                    pruned_feature_vals[hook_point].append(v)
+                else:
+                    error_features[hook_point].append(i)
+                    error_vals[hook_point].append(v)
+        top_activations_per_feature = find_top_activations(
+                    dataloader, model, saes,
+                    pruned_feature_ids, {k: [False]*len(ids) for k,ids in pruned_feature_ids.items()}, batch_size=batch_size, top_k=16, max_samples=50_000,
+                )
+        # now save the images in a grid format
         for hook_point in nodes_indices_loaded.keys():
             sae = saes[hook_point]
 
-            feature_ids = nodes_indices_loaded[hook_point]
-            feature_vals = nodes_values_loaded[hook_point]
+            
+            
 
-            max_feature = sae.d_sae 
-        
-            # the max_feature represents sae error, so it has no associated autointerp, so we represent it with black image 
-            pruned_feature_ids = []
-            pruned_feature_vals = []
-            error_features = []
-            error_vals = []
-            for i, v in zip(feature_ids, feature_vals):
-                if i != max_feature:
-                    pruned_feature_ids.append(i)
-                    pruned_feature_vals.append(v)
-                else:
-                    error_features.append(i)
-                    error_vals.append(v)
-            if pruned_feature_ids:
-                top_activations_per_feature = find_top_activations(
-                    dataloader, model, sae,
-                    pruned_feature_ids, [False]*len(pruned_feature_ids), batch_size=batch_size, top_k=16, max_samples=50_000,
-                )
+            root_name = re.sub(r'\b\d+\b', lambda x: f"{int(x.group()):02d}", hook_point)
+            visualize_top_activating_images(im_folder, root_name, model, sae, top_activations_per_feature[hook_point], pruned_feature_ids[hook_point], dataset, visualize_dataset, device)
 
-                root_name = re.sub(r'\b\d+\b', lambda x: f"{int(x.group()):02d}", hook_point)
-                visualize_top_activating_images(im_folder, root_name, model, sae, top_activations_per_feature, pruned_feature_ids, pruned_feature_vals, dataset, visualize_dataset, device)
-
-            if error_features:
+            if error_features[hook_point]:
                 for e in error_features:
                     # make a dummy image!
 
@@ -384,8 +387,6 @@ if __name__ == "__main__":
     ###### CREATE GRAPH #####################################################
     # parse the edges
                 
-    top_k_edges = 2 # only keep this many edges in total. 
-    edge_threshold = None # only keep edges above this threshold
     all_edge_vals = []
     for src_hook_point in edges_loaded.keys():
         for dst_hook_point, cur_edges in edges_loaded[src_hook_point].items():
@@ -450,7 +451,9 @@ if __name__ == "__main__":
             hook_blah = re.sub(r'\b\d+\b', lambda x: f"{int(x.group()):02d}", hook_point)
             root_name = f"{hook_blah}_{ind}"
             image_path = os.path.join(im_folder, f"{root_name}.{output_image_format}")
-            
+
+
+            assert os.path.exists(image_path), f"could not find {image_path} do_generate_images: {do_generate_images}"
             # Calculate positions
             x = col_index * col_spacing
             y = row_index * row_spacing  

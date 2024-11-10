@@ -87,6 +87,7 @@ def jvp(
         upstream_sae:SparseAutoencoder,
         left_vec : Union[SparseAct, Dict[int, SparseAct]],
         right_vec : SparseAct,
+        downstream_layer: int,
 ):
     """
     Return a sparse shape [# downstream features + 1, # upstream features + 1] tensor of Jacobian-vector products.
@@ -112,10 +113,13 @@ def jvp(
     downstream_act = None 
     upstream_error = None 
     def upstream_hook_fn(x, hook):
-        x = x.detach()
+        x = x.detach().clone().requires_grad_(True)
+
         nonlocal upstream_act, upstream_error
 
         upstream_sae_out, upstream_feature_acts, *_ = upstream_sae(x)
+
+   
 
 
 
@@ -133,7 +137,7 @@ def jvp(
         return x
             
     _ = model.run_with_hooks(inputs, fwd_hooks =[(upstream_hook, upstream_hook_fn), 
-                                                 (downstream_hook, downstream_hook_fn)])
+                                                 (downstream_hook, downstream_hook_fn)], stop_at_layer=downstream_layer+1)
 
     upstream_act.act.retain_grad()
     upstream_act.res.retain_grad()
@@ -144,7 +148,6 @@ def jvp(
         # in full version need intermediate stop grads here but should be ok since only doing residual stream
 
         to_backprops[tuple(downstream_feat_idx)].backward(retain_graph=True)
-
         vjv = (upstream_act.grad @ right_vec).to_tensor()
 
         vjv_values[downstream_feat_idx] = vjv
@@ -386,6 +389,7 @@ def get_circuit(clean_inputs, patch_inputs, model, saes, metric_fn, aggregation=
             saes[prev_resid_hook_point],
             grads[resid_hook_point],
             deltas[prev_resid_hook_point],
+            layer,
             
         )
 

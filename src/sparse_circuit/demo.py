@@ -16,6 +16,7 @@ from vit_prisma.utils.load_model import load_model
 import open_clip
 from sparse_circuit.get_circuit import get_circuit
 import time 
+from vit_prisma.sae.config import VisionModelSAERunnerConfig
 
 
 #NOTE THIS IS THE NO PAIR VERSION. 
@@ -42,6 +43,13 @@ def get_imagenet_val_dataset_visualize(dataset_path, only_these_labels=None):
     torchvision.transforms.Resize((224, 224)),
     torchvision.transforms.ToTensor(),]), return_index=True, only_these_labels=only_these_labels)
 
+def load_sae_config(repo_id,config_name ="config.json"):
+    config_path = hf_hub_download(repo_id, config_name)
+
+    from vit_prisma.sae.config import VisionModelSAERunnerConfig
+    return VisionModelSAERunnerConfig.load_config(config_path)  
+     
+    pass 
 
 def load_sae(repo_id="Prisma-Multimodal/8e32860c-clip-b-sae-gated-all-tokens-x64-layer-9-mlp-out-v1", file_name="n_images_2600058.pt", config_name ="config.json"):
     """
@@ -90,7 +98,48 @@ class ClipTextStuff:
         text_embeddings = text_embeddings / text_embeddings.norm(p=2, dim=-1, keepdim=True)
         text_embeddings = text_embeddings.to(self.device)
         return text_embeddings
+
+## fake sae that really just returns the neurons of whichever layer it's set up for. 
+## mimics the format of our sparseautoencoder so it can just be plugged into the circuit code
+class FakeSae(torch.nn.Module):
+
+    def __init__(self,cfg: VisionModelSAERunnerConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.cfg.d_sae = self.cfg.d_in # since this is just neurons 
+        self.d_sae = self.cfg.d_in
+
+
+        # used to fake decoding and encoding
+        self.W_dec = torch.nn.Parameter(
+                torch.eye(self.cfg.d_in, dtype=self.cfg.dtype, device=self.cfg.device)
+                )
+        self.b_dec = torch.nn.Parameter(
+            torch.zeros(self.cfg.d_in, dtype=self.cfg.dtype, device=self.cfg.device)
+        )
+
+        self.W_enc = torch.nn.Parameter(
+                torch.eye(self.cfg.d_in, dtype=self.cfg.dtype, device=self.cfg.device)
+                )
+        self.b_enc = torch.nn.Parameter(
+            torch.zeros(self.cfg.d_in, dtype=self.cfg.dtype, device=self.cfg.device)
+        )
+
+
+
     
+    def forward(self, x):
+        # this just returns x and 'features' which is also.. just x.plus a bunch of Nones to mimic the sae 
+        fake_sae_activations = x + 0
+
+        fake_sae_out = fake_sae_activations + 0
+        return fake_sae_out, fake_sae_activations, None, None, None, None, None 
+    
+    def run_time_activation_norm_fn_in(self, x):
+        return x 
+    def run_time_activation_norm_fn_out(self,x):
+        return x 
+
 def setup_saes_and_model(device,
               # I choose the ones that seemed like a good balance between xvar and l1 
               # that ended up being the ones with xvar ~= 80% 
@@ -110,7 +159,9 @@ def setup_saes_and_model(device,
         11: "Prisma-Multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-11-hook_resid_post-l1-8e-05",
     },
            debug=False,
-           only_these_layers=None):
+           only_these_layers=None,
+           use_neurons=False # if true will load 'dummy' saes that actually just use neurons
+           ):
 
     if debug:
         for i in range(2,12):
@@ -121,27 +172,51 @@ def setup_saes_and_model(device,
                 del resid_post_repo_ids[i]
 
 
-    # I'm only looking at resid_post just to test things out. The original paper using resid_post, mlp_out and the output of the attention blocks 
-    saes:Dict[str, SparseAutoencoder] = {} # hookpoint to sae in some kinda sensible order 
-    model_name = None 
-    model_class_name = None 
-    for layer,repo_id in resid_post_repo_ids.items():
-        sae = load_sae(repo_id)
-        
-        sae.cfg.device = device
-        sae = sae.to(device)
-        assert sae.cfg.layer_subtype == 'hook_resid_post', 'Currently only set up to hande hook_resid_post, in particular need to update the edge computation. Not too hard but requires both and mlp and attn saes'
+    if use_neurons:
+        # load the cfg to create dummy saes but dont load the sae as a whole
+        saes:Dict[str, FakeSae] = {} 
+        model_name = None 
+        model_class_name = None  
+        for layer,repo_id in resid_post_repo_ids.items():
+            sae_cfg = load_sae_config(repo_id)
+            fake_sae = FakeSae(sae_cfg)
 
-        assert sae.cfg.architecture == "standard", "Haven't checked what changes are needed for gated if any"
+            fake_sae.cfg.device = device
+            fake_sae = fake_sae.to(device)
+            assert fake_sae.cfg.layer_subtype == 'hook_resid_post', 'Currently only set up to hande hook_resid_post, in particular need to update the edge computation. Not too hard but requires both and mlp and attn saes'
 
-        saes[f"blocks.{layer}.hook_resid_post"] = sae
+            assert fake_sae.cfg.architecture == "standard", "Haven't checked what changes are needed for gated if any"
+
+            saes[f"blocks.{layer}.hook_resid_post"] = fake_sae
 
 
-        if model_name is None:
-            model_name = sae.cfg.model_name 
-            model_class_name = sae.cfg.model_class_name
+            if model_name is None:
+                model_name = fake_sae.cfg.model_name 
+                model_class_name = fake_sae.cfg.model_class_name
+                
+            assert model_name == fake_sae.cfg.model_name, "One of the saes is for a different model!"
+    else:
+        # I'm only looking at resid_post just to test things out. The original paper using resid_post, mlp_out and the output of the attention blocks 
+        saes:Dict[str, SparseAutoencoder] = {} # hookpoint to sae in some kinda sensible order 
+        model_name = None 
+        model_class_name = None 
+        for layer,repo_id in resid_post_repo_ids.items():
+            sae = load_sae(repo_id)
             
-        assert model_name == sae.cfg.model_name, "One of the saes is for a different model!"
+            sae.cfg.device = device
+            sae = sae.to(device)
+            assert sae.cfg.layer_subtype == 'hook_resid_post', 'Currently only set up to hande hook_resid_post, in particular need to update the edge computation. Not too hard but requires both and mlp and attn saes'
+
+            assert sae.cfg.architecture == "standard", "Haven't checked what changes are needed for gated if any"
+
+            saes[f"blocks.{layer}.hook_resid_post"] = sae
+
+
+            if model_name is None:
+                model_name = sae.cfg.model_name 
+                model_class_name = sae.cfg.model_class_name
+                
+            assert model_name == sae.cfg.model_name, "One of the saes is for a different model!"
 
     # get the model 
     model = load_model(model_class_name, model_name)
@@ -158,9 +233,10 @@ def main():
     imagenet_dataset_path = r"F:/prisma_data/imagenet-object-localization-challenge"
 
     output_folder = r"F:\ViT-Prisma_fork\data\circuit_output"
-    output_name = "testing_stuff_2"
+    output_name = "testing_stuff_3_saes"
     num_workers = 3
-    batch_size = 8 #NOTE not actually that important if anything, smaller is better aside from speed
+    node_batch_size = 16 
+    edge_batch_size = 4 #NOTE smaller is actually better aside from speed
     device = "cuda"
     ig_steps = 10
     num_examples = 250
@@ -170,30 +246,32 @@ def main():
     node_threshold_std = 3 # keep nodes x std deviations from mean 
     only_these_layers = [7,8,9,10,11] #earlier layers don't seems as easy to interpret so for simplicity using layer layers only
     tokens_per_node = 2 #NOTE make this as big as you can. how many tokens to use per node during edge computation 
+    use_neurons = False # Use neurons instead of sae activations!
+
 
     debug = False
     if debug:
         num_workers = 0 
-        batch_size = 2 
+        node_batch_size = 2 
+        edge_batch_size = 2 
         num_examples = 5
         top_k = 3
 
 
 
     # get the model and the saes
-    model, saes, model_name = setup_saes_and_model(device, debug=debug, only_these_layers=only_these_layers)
+    model, saes, model_name = setup_saes_and_model(device, debug=debug, only_these_layers=only_these_layers, use_neurons=use_neurons)
     
     # get the text embeddings for tinyclip
     clip_text_stuff = ClipTextStuff(model_name, device)
    
     # get the dataloader
     dataset = get_imagenet_val_dataset(imagenet_dataset_path, only_these_labels=only_these_labels)
-    dataloader =  DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
+    
     
 
     ##### SETUP END #########################################################
-    
-    num_examples = min(num_examples, batch_size*(len(dataset)//batch_size))
+ 
     node_name = f"{output_name}_nodes.pt"
     parsed_node_name = f"{output_name}_nodes_parsed.pt"
     edges_name = f"{output_name}_edges.pt"
@@ -211,9 +289,14 @@ def main():
     print("FINDING NODES")
     batch_i = 0
     running_nodes = None 
+    dataloader =  DataLoader(dataset, batch_size=node_batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
+    num_examples = min(num_examples, node_batch_size*(len(dataset)//node_batch_size))
+    
     tic = time.perf_counter()
+
+
     for batch in tqdm(dataloader):
-        if batch_i*batch_size >= num_examples:
+        if batch_i*node_batch_size >= num_examples:
             break 
         batch_i += 1
 
@@ -233,11 +316,11 @@ def main():
     
         # add up all the nodes! (also undo the mean from get_circuit_nodes, turning it in to a sum, could just not do it in the first place but this is consistent with the code and might make more sense when the edge part is done)
         if running_nodes is None:
-            running_nodes = {k : batch_size * nodes[k] for k in nodes.keys() if k != 'y'}
+            running_nodes = {k : node_batch_size * nodes[k] for k in nodes.keys() if k != 'y'}
         else:
             for k in nodes.keys():
                 if k != 'y':
-                    running_nodes[k] += batch_size * nodes[k]
+                    running_nodes[k] += node_batch_size * nodes[k]
 
         del nodes 
 
@@ -264,25 +347,28 @@ def main():
         # Find indices where A > mean + num_std * std
         if node_threshold_std is not None:
             indices = torch.nonzero(results > mean + node_threshold_std * std).squeeze()
+
+            if indices.numel() == 0:
+                # If indices is empty, take the index of the largest value in results
+                indices = torch.argmax(results).unsqueeze(0)
             values_abs = results_abs[indices]            
             values = results[indices]
         else:
             values_abs = results_abs
             values = results
         if top_k is not None:
-            if len(values_abs)> top_k:
+            if values_abs.dim() > 0 and len(values_abs) > top_k:
                 og_amount = len(values_abs)   
                 values_abs, top_k_indices = torch.topk(values_abs, top_k, largest=True)
                 indices = indices[top_k_indices]
                 values = values[top_k_indices]        
 
-                print("removed", og_amount-top_k, 'nodes from', hook_point)
+                print("removed", og_amount-top_k, 'nodes from the original', og_amount, 'in', hook_point)
 
         values_abs, sorted_indices = torch.sort(values_abs, descending=True)
         
         custom_node_indices[hook_point] = indices[sorted_indices].tolist()
         custom_node_values[hook_point] = values[sorted_indices].tolist()
-    print("YO", custom_node_values)
     torch.save((custom_node_indices, custom_node_values), os.path.join(output_folder, parsed_node_name))
 
     del final_nodes
@@ -297,9 +383,11 @@ def main():
     running_edges = None
     batch_i = 0
 
-
+    dataloader =  DataLoader(dataset, batch_size=edge_batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
+    num_examples = min(num_examples, edge_batch_size*(len(dataset)//edge_batch_size))
+    
     for batch in tqdm(dataloader):
-        if batch_i*batch_size >= num_examples:
+        if batch_i*edge_batch_size >= num_examples:
             break 
         batch_i += 1
 
@@ -317,12 +405,12 @@ def main():
 
         # add up all the edges
         if running_edges is None:
-            running_edges = { k : { kk : batch_size * edges[k][kk] for kk in edges[k].keys() } for k in edges.keys()}
+            running_edges = { k : { kk : edge_batch_size * edges[k][kk] for kk in edges[k].keys() } for k in edges.keys()}
 
         else:
             for k in edges.keys():
                     for v in edges[k].keys():
-                        running_edges[k][v] += batch_size * edges[k][v]
+                        running_edges[k][v] += edge_batch_size * edges[k][v]
 
         del edges 
 
