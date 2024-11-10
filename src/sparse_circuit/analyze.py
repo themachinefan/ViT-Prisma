@@ -15,7 +15,7 @@ from pyvis.network import Network
 import networkx as nx
 from PIL import Image, ImageDraw, ImageFont
 import heapq
-
+from copy import copy 
 from sparse_circuit.demo import setup_saes_and_model, get_imagenet_val_dataset, get_imagenet_val_dataset_visualize
 from vit_prisma.sae.sae import SparseAutoencoder
 def find_threshold_for_top_k(A, k):
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     input_name = "testing_stuff_3_saes"
     parsed_nodes_path =  fr"F:\ViT-Prisma_fork\data\circuit_output\{input_name}_nodes_parsed.pt"
     edges_path = fr"F:\ViT-Prisma_fork\data\circuit_output\{input_name}_edges.pt"
-    output_folder = fr"F:\ViT-Prisma_fork\data\circuit_output\{input_name}_output"
+    output_folder = fr"F:\ViT-Prisma_fork\data\circuit_output\{input_name}_output_all_nodes"
 
     nodes_indices_loaded, nodes_values_loaded = torch.load(parsed_nodes_path)
     edges_loaded= torch.load(edges_path)
@@ -276,6 +276,7 @@ if __name__ == "__main__":
     top_k_edges = 50 # only keep this many edges in total. (can be none)
     edge_threshold = 1e-4 #None # only keep edges above this threshold (can be none)
     use_neurons = False # was the circuit computed with neurons? 
+    add_nodes_from_edges = True # if a node has an prominent edge, add it.
 
     #autofind what layers were used (assuming only using the residual stream like the rest of the code)
     only_these_layers = []
@@ -293,7 +294,39 @@ if __name__ == "__main__":
 
     ##### SETUP END #########################################################
 
+  # add nodes from edges
+    #print(nodes_indices_loaded)             
+    #TODO this looks back once, could do more 
+    if add_nodes_from_edges:
+        for src_hook_point in edges_loaded.keys():
+            initial_indices = copy(nodes_indices_loaded[src_hook_point])
+            for dst_hook_point, cur_edges in edges_loaded[src_hook_point].items():
+                if dst_hook_point in nodes_indices_loaded.keys():
+                    for dst_ind in nodes_indices_loaded[dst_hook_point]:
+                        if src_hook_point in nodes_indices_loaded.keys():
+                            all_values = cur_edges[dst_ind]
+                            all_values_abs = all_values.abs()
+                            values = cur_edges[dst_ind][initial_indices].tolist()
+                            
+                            look_at_indices = initial_indices
+                            look_at_values,look_at_indices = zip(*sorted(zip(values, look_at_indices)))
+                            compare_values_abs, compare_indices = torch.topk(all_values_abs, len(values))
+                            compare_values = all_values[compare_indices]
+                            compare_values, compare_indices = zip(*sorted(zip(compare_values.tolist(), compare_indices.tolist())))
+                            # print(src_hook_point, dst_hook_point, dst_ind)
+                            # print("FOUND keeping these:", look_at_values)
+                            # print(look_at_indices)
+                            # print("But there is also:", compare_values)
+                            # print(compare_indices)
 
+                            max_feature = saes[src_hook_point].d_sae 
+                            for new_i, new_v in zip(compare_indices,compare_values):
+                                if np.abs(new_v)>1e-4:
+                                    if new_i not in nodes_indices_loaded[src_hook_point] and new_i!=max_feature:
+                                        nodes_indices_loaded[src_hook_point].append(new_i)
+                                        nodes_values_loaded[src_hook_point].append(-999) #TODO compute
+    #print(nodes_indices_loaded)             
+    #exit(0)
 
 
     ###### GENERATE IMAGES #############################################
@@ -383,8 +416,6 @@ if __name__ == "__main__":
     ###### END GENERATE IMAGES  #############################################
                 
     ###### CREATE GRAPH #####################################################
-    # parse the edges
-                
     all_edge_vals = []
     for src_hook_point in edges_loaded.keys():
         for dst_hook_point, cur_edges in edges_loaded[src_hook_point].items():
@@ -407,8 +438,8 @@ if __name__ == "__main__":
             if dst_hook_point in nodes_indices_loaded.keys():
                 for dst_ind in nodes_indices_loaded[dst_hook_point]:
                     if src_hook_point in nodes_indices_loaded.keys():
-                        
                         values = cur_edges[dst_ind][nodes_indices_loaded[src_hook_point]].tolist()
+
 
                         #TODO sparse tensor instead 
                         for val, src_ind in zip(values,nodes_indices_loaded[src_hook_point] ):
@@ -420,8 +451,8 @@ if __name__ == "__main__":
                                 edges[src_hook_point][dst_hook_point][src_ind] = {} 
                             edges[src_hook_point][dst_hook_point][src_ind][dst_ind] = val 
 
+
     print(edges)    
-    #TODO parse edges!
 
     # create the graph object
     
