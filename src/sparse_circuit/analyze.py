@@ -298,9 +298,7 @@ if __name__ == "__main__":
 
     ###### GENERATE IMAGES #############################################
 
-    im_folder = os.path.join(output_folder, 'images')
     os.makedirs(output_folder, exist_ok=True)
-    os.makedirs(im_folder, exist_ok=True)
 
 
     if do_generate_images:
@@ -339,16 +337,16 @@ if __name__ == "__main__":
             
 
             root_name = re.sub(r'\b\d+\b', lambda x: f"{int(x.group()):02d}", hook_point)
-            visualize_top_activating_images(im_folder, root_name, model, sae, top_activations_per_feature[hook_point], pruned_feature_ids[hook_point], dataset, visualize_dataset, device)
+            visualize_top_activating_images(output_folder, root_name, model, sae, top_activations_per_feature[hook_point], pruned_feature_ids[hook_point], dataset, visualize_dataset, device)
 
             if error_features[hook_point]:
-                for e in error_features:
+                for e in error_features[hook_point]:
                     # make a dummy image!
 
                     # Create a black image of size 100x100
                     black_image = Image.new("RGB", (100, 100), (0, 0, 0))
 
-                    black_image_path =  os.path.join(im_folder, f"{root_name}_{e}.{output_image_format}")
+                    black_image_path =  os.path.join(output_folder, f"{root_name}_{e}.{output_image_format}")
 
                     # add text
                                         
@@ -450,7 +448,7 @@ if __name__ == "__main__":
         for col_index, (ind, val) in enumerate(zip(inds, vals)):
             hook_blah = re.sub(r'\b\d+\b', lambda x: f"{int(x.group()):02d}", hook_point)
             root_name = f"{hook_blah}_{ind}"
-            image_path = os.path.join(im_folder, f"{root_name}.{output_image_format}")
+            image_path = os.path.join(output_folder, f"{root_name}.{output_image_format}")
 
 
             assert os.path.exists(image_path), f"could not find {image_path} do_generate_images: {do_generate_images}"
@@ -502,7 +500,7 @@ if __name__ == "__main__":
     net.toggle_physics(False)
 
     # save and display network
-    output_file = os.path.join(im_folder, "graph_with_values.html")  # must be saved in same folder as images
+    output_file = os.path.join(output_folder, "circuit.html")  # must be saved in same folder as images
     net.write_html(output_file)
 
 

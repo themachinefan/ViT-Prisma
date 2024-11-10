@@ -244,7 +244,7 @@ def main():
     only_these_labels=[281, 282, 283, 284, 285] # only use these classes from imagenet1k
     top_k = 10 # save at most top_k nodes per layer
     node_threshold_std = 3 # keep nodes x std deviations from mean 
-    only_these_layers = [7,8,9,10,11] #earlier layers don't seems as easy to interpret so for simplicity using layer layers only
+    only_these_layers = [6, 7,8,9,10,11] #earlier layers don't seems as easy to interpret so for simplicity using layer layers only
     tokens_per_node = 2 #NOTE make this as big as you can. how many tokens to use per node during edge computation 
     use_neurons = False # Use neurons instead of sae activations!
 

@@ -157,6 +157,7 @@ class HookedRootModule(nn.Module):
         bwd_hooks: List[Tuple[Union[str, Callable], Callable]] = [],
         reset_hooks_end: bool = True,
         clear_contexts: bool = False,
+        **model_kwargs
     ):
         """
         Executes the model with specified forward and backward hooks.
@@ -169,7 +170,7 @@ class HookedRootModule(nn.Module):
                 Each tuple contains a string (layer name) or a callable to match layers, and a callable hook function.
             reset_hooks_end (bool, optional): Whether to reset the hooks at the end of the run. Default is True.
             clear_contexts (bool, optional): Whether to clear contexts at the end of the run. Default is False.
-
+            model_kwargs: Optional arguments sent to model
         Returns:
             The output of the model's forward method.
 
@@ -184,7 +185,7 @@ class HookedRootModule(nn.Module):
         with self.hooks(
             fwd_hooks, bwd_hooks,reset_hooks_end, clear_contexts
         ) as hooked_model:
-            return hooked_model.forward(*model_args)
+            return hooked_model.forward(*model_args, **model_kwargs)
 
     def add_caching_hooks(
             self,
