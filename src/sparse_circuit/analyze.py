@@ -275,7 +275,7 @@ if __name__ == "__main__":
     auto_open_browse_on_completion = True
     top_k_edges = 50 # only keep this many edges in total. (can be none)
     edge_threshold = 1e-4 #None # only keep edges above this threshold (can be none)
-    use_neurons = True # was the circuit computed with neurons? 
+    use_neurons = False # was the circuit computed with neurons? 
 
     #autofind what layers were used (assuming only using the residual stream like the rest of the code)
     only_these_layers = []
