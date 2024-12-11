@@ -874,6 +874,12 @@ def convert_pretrained_model_config(model_name: str, is_timm: bool = True, is_cl
                 "return_type": "class_logits"
             })
     
+    if is_clip:
+        pretrained_config.update({
+            "layer_norm_pre": hf_config.layer_norm_pre if hasattr(hf_config, "layer_norm_pre") else True,
+            "return_type": "class_logits"
+        })
+
     config = HookedViTConfig.from_dict(pretrained_config)
     return config
 

@@ -10,7 +10,7 @@ from transformers import CLIPProcessor, CLIPModel
 def test_loading_clip():
     TOLERANCE = 1e-4
 
-    model_name = "wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M"
+    model_name = "openai/clip-vit-base-patch32"
     batch_size = 5
     channels = 3
     height = 224
@@ -25,7 +25,7 @@ def test_loading_clip():
     tinyclip.to(device)
     tinyclip_final_proj.to(device)
 
-    hooked_model = HookedViT.from_pretrained(model_name, is_timm=False, is_clip=True)
+    hooked_model = HookedViT.from_pretrained(model_name, is_timm=False, is_clip=True, fold_ln=False)
     hooked_model.to(device)
 
     with torch.random.fork_rng():
